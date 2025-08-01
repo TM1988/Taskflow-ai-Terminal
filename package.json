@@ -1,0 +1,29 @@
+{
+  "name": "taskflow-ai-terminal",
+  "version": "1.0.0",
+  "description": "A terminal-based interface for Taskflow AI",
+  "type": "module",
+  "main": "index.mjs",
+  "scripts": {
+    "start": "node index.mjs",
+    "dev": "nodemon index.mjs"
+  },
+  "keywords": [
+    "taskflow",
+    "tui",
+    "terminal",
+    "firebase"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^4.1.2",
+    "clear": "^0.1.0",
+    "dotenv": "^16.0.3",
+    "figlet": "^1.6.0",
+    "firebase": "^10.7.0",
+    "firebase-admin": "^13.4.0",
+    "inquirer": "^12.9.0",
+    "mongoose": "^8.0.0"
+  }
+}
