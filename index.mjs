@@ -1911,12 +1911,18 @@ async function showAllTasks(userId) {
     // Calculate responsive column widths
     const terminalWidth = boardWidth;
     const numColumns = Object.keys(columns).length;
-    const separatorWidth = 2;
-    const totalSeparatorWidth = (numColumns - 1) * separatorWidth;
-    const paddingWidth = 4;
-    const availableWidth = terminalWidth - totalSeparatorWidth - paddingWidth;
-    const colWidth = Math.floor(availableWidth / numColumns);
     const separator = chalk.gray('│');
+    const separatorPadding = 1; // Space on each side of separator
+    const totalSeparatorWidth = (numColumns - 1) * (1 + (separatorPadding * 2)); // 1 for separator + padding
+    const availableWidth = terminalWidth - totalSeparatorWidth;
+    const colWidth = Math.floor(availableWidth / numColumns);
+    
+    // Function to get visual width of a string (ignoring ANSI codes)
+    const visualLength = (str) => {
+      // Remove ANSI color codes before calculating length
+      const ansiRegex = /[\u001b\u009b][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d\/#&.:=?%@~_]*)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-ntqry=><~]))/g;
+      return str.replace(ansiRegex, '').length;
+    };
 
     // Print column headers with colors
     let headerLine = '';
@@ -1939,11 +1945,14 @@ async function showAllTasks(userId) {
         default: coloredHeader = chalk.white.bold(headerText);
       }
       
-      // Pad the actual text (not the colored version) to exact column width
-      const paddedText = headerText.padEnd(colWidth);
-      // Replace the original text in the colored version with the padded version
-      const paddedHeader = coloredHeader.replace(headerText, paddedText);
+      // Calculate padding needed for this header (using visual length)
+      const visualHeaderLength = visualLength(headerText);
+      const paddingNeeded = Math.max(0, colWidth - visualHeaderLength);
+      const leftPadding = Math.floor(paddingNeeded / 2);
+      const rightPadding = paddingNeeded - leftPadding;
       
+      // Create padded header with centered text
+      const paddedHeader = ' '.repeat(leftPadding) + coloredHeader + ' '.repeat(rightPadding);
       headerLine += paddedHeader;
       if (index < numColumns - 1) headerLine += ` ${separator} `;
     });
@@ -1978,9 +1987,11 @@ async function showAllTasks(userId) {
           // Format: "● Task Title"
           const taskText = `${coloredPriority} ${taskTitle}`;
           
-          // Pad the entire cell to column width
-          const paddedText = taskText.padEnd(colWidth);
-          row += paddedText.substring(0, colWidth);
+          // Pad the task text to column width with proper alignment (using visual length)
+          const visualTaskLength = visualLength(taskText);
+          const paddingNeeded = Math.max(0, colWidth - visualTaskLength);
+          const paddedText = taskText + ' '.repeat(paddingNeeded);
+          row += paddedText;
           globalTaskNum++;
         } else {
           row += ' '.repeat(colWidth);
