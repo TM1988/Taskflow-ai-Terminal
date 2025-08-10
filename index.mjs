@@ -1929,6 +1929,7 @@ async function showAllTasks(userId) {
       
       const headerText = `${title} ${countText}`;
       
+      // Create colored header with proper padding
       let coloredHeader;
       switch(status) {
         case 'todo': coloredHeader = chalk.yellow.bold(headerText); break;
@@ -1938,9 +1939,12 @@ async function showAllTasks(userId) {
         default: coloredHeader = chalk.white.bold(headerText);
       }
       
-      // Pad the header to exact column width
-      const paddedHeader = headerText.padEnd(colWidth);
-      headerLine += coloredHeader.replace(headerText, paddedHeader);
+      // Pad the actual text (not the colored version) to exact column width
+      const paddedText = headerText.padEnd(colWidth);
+      // Replace the original text in the colored version with the padded version
+      const paddedHeader = coloredHeader.replace(headerText, paddedText);
+      
+      headerLine += paddedHeader;
       if (index < numColumns - 1) headerLine += ` ${separator} `;
     });
     console.log(headerLine);
@@ -1999,6 +2003,7 @@ async function showAllTasks(userId) {
         message: '\nWhat would you like to do?',
         choices: [
           { name: 'View Task Details', value: 'view' },
+          { name: 'Move Tasks', value: 'move' },
           { name: 'Create New Task', value: 'create' },
           { name: 'Refresh', value: 'refresh' },
           { name: 'Back to Dashboard', value: 'dashboard' }
@@ -2046,6 +2051,16 @@ async function showAllTasks(userId) {
           await showTaskDetails(task, project, userId);
         } else {
           console.log(chalk.yellow('\nNo tasks to view.'));
+          await new Promise(resolve => setTimeout(resolve, 1500));
+          await showAllTasks(userId);
+        }
+        break;
+        
+      case 'move':
+        if (allTasks.length > 0) {
+          await showMoveTasksMenu(allTasks, userId);
+        } else {
+          console.log(chalk.yellow('\nNo tasks to move.'));
           await new Promise(resolve => setTimeout(resolve, 1500));
           await showAllTasks(userId);
         }
@@ -2122,7 +2137,12 @@ async function showTaskDetails(task, project, userId) {
   }
   
   console.log(chalk.bold('Status:      '), `${statusEmoji} ${formatStatus(task.status)}`);
-  console.log(chalk.bold('Priority:    '), `${priorityEmoji} ${formatPriority(task.priority)}`);
+  
+  // Add colored priority display
+  const priorityColor = getPriorityColor(task.priority);
+  const priorityText = formatPriority(task.priority);
+  console.log(chalk.bold('Priority:    '), `${priorityEmoji} ${priorityColor(priorityText)}`);
+  
   console.log(chalk.bold('Due Date:    '), dueDate);
   
   if (task.labels && task.labels.length > 0) {
@@ -2926,24 +2946,82 @@ async function showTagSettings(userId) {
   }
 }
 
+async function showMoveTasksMenu(allTasks, userId) {
+  showWelcome();
+  
+  try {
+    console.log(chalk.cyan('\n🔄 Move Tasks'));
+    console.log(chalk.gray('━'.repeat(50)));
+    
+    const { selectedTask } = await prompt([
+      {
+        type: 'list',
+        name: 'selectedTask',
+        message: 'Select a task to move:',
+        choices: allTasks.map((task, index) => ({
+          name: `${getPriorityIndicator(task.priority)} ${task.title || 'Untitled'} (${formatStatus(task.status)})`,
+          value: index
+        })),
+        pageSize: 10
+      }
+    ]);
+    
+    const task = allTasks[selectedTask];
+    const currentStatus = task.status || 'todo';
+    
+    console.log(chalk.blue(`\nMoving: ${task.title}`));
+    console.log(chalk.gray(`Current status: ${formatStatus(currentStatus)}`));
+    
+    const { newStatus } = await prompt([
+      {
+        type: 'list',
+        name: 'newStatus',
+        message: 'Move to which column?',
+        choices: [
+          { name: chalk.yellow('To Do'), value: 'todo' },
+          { name: chalk.blue('In Progress'), value: 'in-progress' },
+          { name: chalk.magenta('Review'), value: 'review' },
+          { name: chalk.green('Done'), value: 'done' }
+        ].filter(choice => choice.value !== currentStatus) // Don't show current status
+      }
+    ]);
+    
+    // Update the task
+    try {
+      await updateTask(task._id, { status: newStatus });
+      console.log(chalk.green(`\n✅ Task moved to ${formatStatus(newStatus)}!`));
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      await showAllTasks(userId);
+    } catch (error) {
+      console.error(chalk.red('\n❌ Error moving task:'), error.message);
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      await showAllTasks(userId);
+    }
+    
+  } catch (error) {
+    console.error(chalk.red('\n❌ Error in move tasks menu:'), error.message);
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    await showAllTasks(userId);
+  }
+}
+
 async function showBoardSettings(userId) {
   showWelcome();
   
   try {
-    console.log(chalk.cyan('\n📋 Board Settings'));
+    console.log(chalk.cyan('\nBoard Settings'));
     console.log(chalk.gray('━'.repeat(50)));
     
-    console.log(chalk.bold('\n🎯 Column Management:'));
+    console.log(chalk.bold('\nColumn Management:'));
     console.log('  Current columns: To Do, In Progress, Review, Done');
-    console.log(chalk.gray('  (Column customization available in web app)'));
     
-    console.log(chalk.bold('\n📝 Default Columns:'));
+    console.log(chalk.bold('\nDefault Columns:'));
     console.log('  • ' + chalk.yellow('To Do') + ' - New tasks start here');
     console.log('  • ' + chalk.blue('In Progress') + ' - Work in progress');
     console.log('  • ' + chalk.magenta('Review') + ' - Tasks awaiting review');
     console.log('  • ' + chalk.green('Done') + ' - Completed tasks');
     
-    console.log(chalk.bold('\n⚙️ Board Preferences:'));
+    console.log(chalk.bold('\nBoard Preferences:'));
     console.log('  • Auto-refresh: Enabled');
     console.log('  • Task numbering: Global sequence');
     console.log('  • Priority indicators: Color-coded dots');
@@ -2955,17 +3033,22 @@ async function showBoardSettings(userId) {
         name: 'action',
         message: 'Board settings options:',
         choices: [
-          { name: '🌐 Open Web App Board Settings', value: 'web' },
-          { name: '🔄 Test Board Layout', value: 'test' },
+          { name: 'Manage Columns', value: 'columns' },
+          { name: 'Test Board Layout', value: 'test' },
+          { name: 'Open Web App Board Settings', value: 'web' },
           createSeparator(),
-          { name: '🔙 Back to Settings', value: 'back' }
+          { name: 'Back to Settings', value: 'back' }
         ]
       }
     ]);
     
     switch (action) {
+      case 'columns':
+        await showColumnManagement(userId);
+        return;
+        
       case 'web':
-        console.log(chalk.cyan('\n🌐 Web App Features:'));
+        console.log(chalk.cyan('\nWeb App Features:'));
         console.log('  • Add up to 8 custom columns');
         console.log('  • Rename existing columns');
         console.log('  • Reorder column positions');
@@ -2976,7 +3059,7 @@ async function showBoardSettings(userId) {
         break;
         
       case 'test':
-        console.log(chalk.cyan('\n🧪 Testing current board layout...'));
+        console.log(chalk.cyan('\nTesting current board layout...'));
         await showAllTasks(userId);
         return;
         
@@ -2993,6 +3076,292 @@ async function showBoardSettings(userId) {
     await prompt([{ type: 'input', name: 'continue', message: 'Press Enter to continue...' }]);
     await showSettings(userId);
   }
+}
+
+async function showColumnManagement(userId) {
+  showWelcome();
+  
+  try {
+    // Get current columns from database (for future expansion)
+    const currentColumns = [
+      { key: 'todo', name: 'To Do', color: 'yellow', order: 1 },
+      { key: 'in-progress', name: 'In Progress', color: 'blue', order: 2 },
+      { key: 'review', name: 'Review', color: 'magenta', order: 3 },
+      { key: 'done', name: 'Done', color: 'green', order: 4 }
+    ];
+    
+    console.log(chalk.cyan('\nColumn Management'));
+    console.log(chalk.gray('━'.repeat(50)));
+    
+    console.log(chalk.bold('\nCurrent Columns:'));
+    currentColumns.forEach((col, index) => {
+      const colorFn = chalk[col.color] || chalk.white;
+      console.log(`  ${index + 1}. ${colorFn(col.name)} (${col.key})`);
+    });
+    
+    const { action } = await prompt([
+      {
+        type: 'list',
+        name: 'action',
+        message: '\nColumn management options:',
+        choices: [
+          { name: 'Rename Column', value: 'rename' },
+          { name: 'Reorder Columns', value: 'reorder' },
+          { name: 'Add New Column', value: 'add' },
+          { name: 'Remove Column', value: 'remove' },
+          { name: 'Reset to Default', value: 'reset' },
+          createSeparator(),
+          { name: 'Test Current Layout', value: 'test' },
+          { name: 'Back to Board Settings', value: 'back' }
+        ]
+      }
+    ]);
+    
+    switch (action) {
+      case 'rename':
+        await renameColumn(currentColumns, userId);
+        break;
+        
+      case 'reorder':
+        await reorderColumns(currentColumns, userId);
+        break;
+        
+      case 'add':
+        await addNewColumn(currentColumns, userId);
+        break;
+        
+      case 'remove':
+        await removeColumn(currentColumns, userId);
+        break;
+        
+      case 'reset':
+        console.log(chalk.yellow('\nNote: Currently using default column configuration.'));
+        console.log(chalk.cyan('Future updates will allow saving custom column configurations!'));
+        await prompt([{ type: 'input', name: 'continue', message: 'Press Enter to continue...' }]);
+        await showColumnManagement(userId);
+        break;
+        
+      case 'test':
+        await showAllTasks(userId);
+        break;
+        
+      case 'back':
+        await showBoardSettings(userId);
+        break;
+    }
+    
+  } catch (error) {
+    console.error(chalk.red('Error in column management:'), error.message);
+    await prompt([{ type: 'input', name: 'continue', message: 'Press Enter to continue...' }]);
+    await showBoardSettings(userId);
+  }
+}
+
+async function renameColumn(columns, userId) {
+  console.log(chalk.cyan('\nRename Column'));
+  console.log(chalk.gray('━'.repeat(30)));
+  
+  const { columnIndex } = await prompt([
+    {
+      type: 'list',
+      name: 'columnIndex',
+      message: 'Select column to rename:',
+      choices: columns.map((col, index) => ({
+        name: `${col.name} (${col.key})`,
+        value: index
+      }))
+    }
+  ]);
+  
+  const column = columns[columnIndex];
+  
+  const { newName } = await prompt([
+    {
+      type: 'input',
+      name: 'newName',
+      message: `Enter new name for "${column.name}":`,
+      default: column.name,
+      validate: (input) => {
+        if (input.trim().length < 1) return 'Column name cannot be empty';
+        if (input.length > 20) return 'Column name must be 20 characters or less';
+        return true;
+      }
+    }
+  ]);
+  
+  console.log(chalk.green(`\n✅ Column "${column.name}" would be renamed to "${newName}"`));
+  console.log(chalk.cyan('Note: Column renaming will be saved in future updates!'));
+  
+  await prompt([{ type: 'input', name: 'continue', message: 'Press Enter to continue...' }]);
+  await showColumnManagement(userId);
+}
+
+async function reorderColumns(columns, userId) {
+  console.log(chalk.cyan('\nReorder Columns'));
+  console.log(chalk.gray('━'.repeat(30)));
+  
+  console.log('\nCurrent order:');
+  columns.forEach((col, index) => {
+    console.log(`  ${index + 1}. ${col.name}`);
+  });
+  
+  const { fromIndex } = await prompt([
+    {
+      type: 'list',
+      name: 'fromIndex',
+      message: 'Select column to move:',
+      choices: columns.map((col, index) => ({
+        name: `${index + 1}. ${col.name}`,
+        value: index
+      }))
+    }
+  ]);
+  
+  const { toIndex } = await prompt([
+    {
+      type: 'list',
+      name: 'toIndex',
+      message: 'Move to position:',
+      choices: columns.map((col, index) => ({
+        name: `Position ${index + 1}`,
+        value: index
+      })).filter((_, index) => index !== fromIndex)
+    }
+  ]);
+  
+  const newOrder = [...columns];
+  const [movedColumn] = newOrder.splice(fromIndex, 1);
+  newOrder.splice(toIndex, 0, movedColumn);
+  
+  console.log(chalk.green('\n✅ New column order:'));
+  newOrder.forEach((col, index) => {
+    console.log(`  ${index + 1}. ${col.name}`);
+  });
+  
+  console.log(chalk.cyan('\nNote: Column reordering will be saved in future updates!'));
+  
+  await prompt([{ type: 'input', name: 'continue', message: 'Press Enter to continue...' }]);
+  await showColumnManagement(userId);
+}
+
+async function addNewColumn(columns, userId) {
+  console.log(chalk.cyan('\nAdd New Column'));
+  console.log(chalk.gray('━'.repeat(30)));
+  
+  const { name } = await prompt([
+    {
+      type: 'input',
+      name: 'name',
+      message: 'Enter column name:',
+      validate: (input) => {
+        if (input.trim().length < 1) return 'Column name cannot be empty';
+        if (input.length > 20) return 'Column name must be 20 characters or less';
+        if (columns.some(col => col.name.toLowerCase() === input.toLowerCase())) {
+          return 'A column with this name already exists';
+        }
+        return true;
+      }
+    }
+  ]);
+  
+  const { color } = await prompt([
+    {
+      type: 'list',
+      name: 'color',
+      message: 'Select column color:',
+      choices: [
+        { name: chalk.red('Red'), value: 'red' },
+        { name: chalk.green('Green'), value: 'green' },
+        { name: chalk.blue('Blue'), value: 'blue' },
+        { name: chalk.yellow('Yellow'), value: 'yellow' },
+        { name: chalk.magenta('Magenta'), value: 'magenta' },
+        { name: chalk.cyan('Cyan'), value: 'cyan' },
+        { name: chalk.white('White'), value: 'white' },
+        { name: chalk.gray('Gray'), value: 'gray' }
+      ]
+    }
+  ]);
+  
+  const { position } = await prompt([
+    {
+      type: 'list',
+      name: 'position',
+      message: 'Insert at position:',
+      choices: [
+        ...columns.map((col, index) => ({
+          name: `Before "${col.name}" (position ${index + 1})`,
+          value: index
+        })),
+        { name: `At the end (position ${columns.length + 1})`, value: columns.length }
+      ]
+    }
+  ]);
+  
+  console.log(chalk.green(`\n✅ New column "${name}" would be added at position ${position + 1}`));
+  console.log(chalk.cyan('Note: Custom columns will be saved in future updates!'));
+  
+  await prompt([{ type: 'input', name: 'continue', message: 'Press Enter to continue...' }]);
+  await showColumnManagement(userId);
+}
+
+async function removeColumn(columns, userId) {
+  console.log(chalk.cyan('\nRemove Column'));
+  console.log(chalk.gray('━'.repeat(30)));
+  
+  if (columns.length <= 2) {
+    console.log(chalk.yellow('\n⚠️  Cannot remove columns - minimum of 2 columns required.'));
+    await prompt([{ type: 'input', name: 'continue', message: 'Press Enter to continue...' }]);
+    await showColumnManagement(userId);
+    return;
+  }
+  
+  const { columnIndex } = await prompt([
+    {
+      type: 'list',
+      name: 'columnIndex',
+      message: 'Select column to remove:',
+      choices: columns.map((col, index) => ({
+        name: `${col.name} (${col.key})`,
+        value: index
+      }))
+    }
+  ]);
+  
+  const column = columns[columnIndex];
+  
+  const { confirm } = await prompt([
+    {
+      type: 'confirm',
+      name: 'confirm',
+      message: `Are you sure you want to remove "${column.name}"?`,
+      default: false
+    }
+  ]);
+  
+  if (confirm) {
+    const { moveTasksTo } = await prompt([
+      {
+        type: 'list',
+        name: 'moveTasksTo',
+        message: `Move tasks from "${column.name}" to:`,
+        choices: columns
+          .filter((_, index) => index !== columnIndex)
+          .map(col => ({
+            name: col.name,
+            value: col.key
+          }))
+      }
+    ]);
+    
+    console.log(chalk.green(`\n✅ Column "${column.name}" would be removed`));
+    console.log(chalk.blue(`Tasks would be moved to "${columns.find(c => c.key === moveTasksTo)?.name}"`));
+    console.log(chalk.cyan('Note: Column removal will be implemented in future updates!'));
+  } else {
+    console.log(chalk.gray('\nColumn removal cancelled.'));
+  }
+  
+  await prompt([{ type: 'input', name: 'continue', message: 'Press Enter to continue...' }]);
+  await showColumnManagement(userId);
 }
 
 /**
