@@ -3,6 +3,7 @@ process.removeAllListeners('warning');
 import 'dotenv/config';
 import admin from 'firebase-admin';
 import inquirer from 'inquirer';
+import ora from 'ora';
 import chalk from 'chalk';
 import { createInterface } from 'readline';
 import { stdin as input, stdout as output } from 'process';
@@ -493,18 +494,28 @@ const auth = getAuth(firebaseApp);
 
 function showWelcome() {
   clear();
-  console.log(
-    chalk.blue(
-      figlet.textSync('Taskflow AI', { 
-        font: 'Standard',
-        horizontalLayout: 'full',
-        verticalLayout: 'default',
-        width: 80,
-        whitespaceBreak: true
-      })
-    )
-  );
-  console.log(chalk.yellow.bold('Terminal Interface\n'));
+  
+  // Add left padding for all console output
+  const padding = '  '; // 2 spaces padding
+  
+  // Override console.log to add padding
+  const originalLog = console.log;
+  console.log = function() {
+    const args = Array.from(arguments);
+    if (args[0] && typeof args[0] === 'string' && !args[0].startsWith(' ')) {
+      args[0] = padding + args[0];
+    }
+    originalLog.apply(console, args);
+  };
+  
+  console.log(chalk.cyan(`
+████████╗ █████╗ ███████╗██╗  ██╗███████╗██╗      ██████╗ ██╗    ██╗     █████╗ ██╗
+╚══██╔══╝██╔══██╗██╔════╝██║ ██╔╝██╔════╝██║     ██╔═══██╗██║    ██║    ██╔══██╗██║
+   ██║   ███████║███████╗█████╔╝ █████╗  ██║     ██║   ██║██║ █╗ ██║    ███████║██║
+   ██║   ██╔══██║╚════██║██╔═██╗ ██╔══╝  ██║     ██║   ██║██║███╗██║    ██╔══██║██║
+   ██║   ██║  ██║███████║██║  ██╗██║     ███████╗╚██████╔╝╚███╔███╔╝    ██║  ██║██║
+   ╚═╝   ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚══════╝ ╚═════╝  ╚══╝╚══╝     ╚═╝  ╚═╝╚═╝
+  `));
 }
 
 
@@ -923,25 +934,41 @@ async function showDashboard(userId) {
     console.log(chalk.blue(`\nDashboard - ${user.displayName || user.email.split('@')[0]}`));
     console.log(chalk.gray('━'.repeat(60)));
     
-    console.log(chalk.bold('Task Summary:'));
-    console.log(`  • Total: ${chalk.bold(totalTasks)}`);
+    // Reorder and display task counts
+    const taskCounts = [
+      { label: 'To Do', ...columnCounts['todo'] },
+      { label: 'In Progress', ...columnCounts['in-progress'] },
+      { label: 'Review', ...columnCounts['review'] },
+      { label: 'Done', ...columnCounts['done'] },
+      { label: 'Total Tasks', count: totalTasks, color: chalk.white.bold }
+    ];
     
-    // Display all columns dynamically
-    Object.entries(columnCounts).forEach(([status, config]) => {
-      const coloredCount = config.color(config.count.toString());
-      const displayText = config.icon ? `${config.icon} ${config.label}` : config.label;
-      console.log(`  • ${displayText}: ${coloredCount}`);
-    });
+    // Display in two columns with padding
+    for (let i = 0; i < taskCounts.length; i += 2) {
+      const item1 = taskCounts[i];
+      const item2 = taskCounts[i + 1];
+      
+      // First column with consistent spacing
+      let line = `  • ${item1.label}: ${item1.color.bold(item1.count)}`;
+      
+      if (item2) {
+        // Add spacing to align the first letter with the 6 in 'Total Tasks: 6'
+        const spacing = item2.label === 'In Progress' ? '     ' : '        ';
+        line += spacing + `• ${item2.label}: ${item2.color ? item2.color.bold(item2.count) : item2.count}`;
+      }
+      console.log(line);
+    }
+    
+    console.log(chalk.gray('━'.repeat(60)));
     
     const choices = [
-      { name: 'View All Tasks', value: 'all-tasks' },
-      { name: 'Analytics Dashboard', value: 'analytics' },
+      { name: '📋 View All Tasks', value: 'all-tasks' },
+      { name: '📊 Analytics Dashboard', value: 'analytics' },
       createSeparator(),
-      { name: 'Create New Task', value: 'create-task' },
+      { name: '👤 View Profile', value: 'profile' },
+      { name: '⚙️  Settings', value: 'settings' },
       createSeparator(),
-      { name: 'View Profile', value: 'profile' },
-      { name: 'Settings', value: 'settings' },
-      { name: 'Logout', value: 'logout' },
+      { name: '🚪 Logout', value: 'logout' },
       { name: 'Exit', value: 'exit' }
     ];
     
@@ -2962,14 +2989,23 @@ async function showMoveTasksMenu(allTasks, userId) {
   
   try {
     console.log(chalk.cyan('\n🔄 Move Tasks'));
-    console.log(chalk.gray('━'.repeat(50)));
+    console.log(chalk.gray('━'.repeat(60)));
+    
+    // Filter out completed tasks if they're not meant to be moved
+    const movableTasks = allTasks.filter(task => !task.status || task.status !== 'done');
+    
+    if (movableTasks.length === 0) {
+      console.log(chalk.yellow('\nNo tasks available to move.'));
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      return showAllTasks(userId);
+    }
     
     const { selectedTask } = await prompt([
       {
         type: 'list',
         name: 'selectedTask',
         message: 'Select a task to move:',
-        choices: allTasks.map((task, index) => ({
+        choices: movableTasks.map((task, index) => ({
           name: `${getPriorityIndicator(task.priority)} ${task.title || 'Untitled'} (${formatStatus(task.status)})`,
           value: index
         })),
@@ -2977,41 +3013,84 @@ async function showMoveTasksMenu(allTasks, userId) {
       }
     ]);
     
-    const task = allTasks[selectedTask];
+    const task = movableTasks[selectedTask];
     const currentStatus = task.status || 'todo';
     
     console.log(chalk.blue(`\nMoving: ${task.title}`));
     console.log(chalk.gray(`Current status: ${formatStatus(currentStatus)}`));
     
+    // Define available statuses with their display names
+    const statusOptions = [
+      { name: 'To Do', value: 'todo', color: chalk.yellow },
+      { name: 'In Progress', value: 'in-progress', color: chalk.blue },
+      { name: 'Review', value: 'review', color: chalk.magenta },
+      { name: 'Done', value: 'done', color: chalk.green }
+    ];
+    
+    // Filter out current status and map to choices with colors
     const { newStatus } = await prompt([
       {
         type: 'list',
         name: 'newStatus',
         message: 'Move to which column?',
-        choices: [
-          { name: chalk.yellow('To Do'), value: 'todo' },
-          { name: chalk.blue('In Progress'), value: 'in-progress' },
-          { name: chalk.magenta('Review'), value: 'review' },
-          { name: chalk.green('Done'), value: 'done' }
-        ].filter(choice => choice.value !== currentStatus) // Don't show current status
+        choices: statusOptions
+          .filter(option => option.value !== currentStatus)
+          .map(option => ({
+            name: option.color(option.name),
+            value: option.value,
+            short: option.name
+          }))
       }
     ]);
     
-    // Update the task
-    try {
-      await updateTask(task._id, { status: newStatus });
-      console.log(chalk.green(`\n✅ Task moved to ${formatStatus(newStatus)}!`));
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      await showAllTasks(userId);
-    } catch (error) {
-      console.error(chalk.red('\n❌ Error moving task:'), error.message);
-      await new Promise(resolve => setTimeout(resolve, 2000));
+    // Get the display name for the new status
+    const newStatusName = statusOptions.find(s => s.value === newStatus)?.name || newStatus;
+    
+    // Update the task with confirmation
+    const { confirmMove } = await prompt([
+      {
+        type: 'confirm',
+        name: 'confirmMove',
+        message: `Are you sure you want to move "${task.title}" to ${newStatusName}?`,
+        default: true
+      }
+    ]);
+    
+    if (confirmMove) {
+      try {
+        // Clear the screen for a cleaner update
+        console.clear();
+        showWelcome();
+        
+        // Show loading indicator
+        const spinner = ora(chalk.blue(`Moving task to ${formatStatus(newStatus)}...`)).start();
+        
+        // Update the task
+        await updateTask(task._id, { status: newStatus });
+        
+        // Show success message
+        spinner.succeed(chalk.green(`✅ Task moved to ${formatStatus(newStatus)}!`));
+        
+        // Refresh the task list
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        await showAllTasks(userId);
+        
+      } catch (error) {
+        console.error(chalk.red('\n❌ Error moving task:'), error.message);
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        await showAllTasks(userId);
+      }
+    } else {
+      console.log(chalk.yellow('\nTask move cancelled.'));
+      await new Promise(resolve => setTimeout(resolve, 1000));
       await showAllTasks(userId);
     }
     
   } catch (error) {
-    console.error(chalk.red('\n❌ Error in move tasks menu:'), error.message);
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    if (error.message !== 'User force closed the prompt with 0 null') {
+      console.error(chalk.red('\n❌ Error in move tasks menu:'), error.message);
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
     await showAllTasks(userId);
   }
 }
