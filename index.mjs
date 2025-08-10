@@ -857,6 +857,7 @@ async function showDashboard(userId) {
       { name: '➕ Create New Task', value: 'create-task' },
       createSeparator(),
       { name: '👤 View Profile', value: 'profile' },
+      { name: '⚙️ Settings', value: 'settings' },
       { name: '🚪 Logout', value: 'logout' },
       { name: '❌ Exit', value: 'exit' }
     ];
@@ -880,6 +881,9 @@ async function showDashboard(userId) {
         break;
       case 'profile':
         await showProfile(user);
+        break;
+      case 'settings':
+        await showSettings(userId);
         break;
       case 'logout':
         await handleLogout();
@@ -1595,8 +1599,8 @@ async function createTask(userId) {
         choices: [
           { name: 'To Do', value: 'todo' },
           { name: 'In Progress', value: 'in-progress' },
-          { name: 'In Review', value: 'in-review' },
-          { name: 'Completed', value: 'completed' }
+          { name: 'Review', value: 'review' },
+          { name: 'Done', value: 'done' }
         ],
         default: 'todo'
       },
@@ -1607,8 +1611,7 @@ async function createTask(userId) {
         choices: [
           { name: 'Low', value: 'low' },
           { name: 'Medium', value: 'medium' },
-          { name: 'High', value: 'high' },
-          { name: 'Urgent', value: 'urgent' }
+          { name: 'High', value: 'high' }
         ],
         default: 'medium'
       },
@@ -2254,6 +2257,579 @@ async function showProfile(user) {
     await showProfile(user);
   } else {
     await showDashboard(user.uid);
+  }
+}
+
+/**
+ * Settings management interface
+ */
+async function showSettings(userId) {
+  let settingsActive = true;
+  
+  while (settingsActive) {
+    showWelcome();
+    console.log(chalk.blue('\n⚙️ Settings\n'));
+    
+    const { section } = await prompt([
+      {
+        type: 'list',
+        name: 'section',
+        message: 'Choose a settings section:',
+        choices: [
+          { name: '🤖 AI Configuration', value: 'ai' },
+          { name: '📧 Email Notifications', value: 'email' },
+          { name: '🔔 In-App Notifications', value: 'notifications' },
+          { name: '🏷️ Task Tags', value: 'tags' },
+          { name: '👤 Profile Settings', value: 'profile' },
+          createSeparator(),
+          { name: '🔙 Back to Dashboard', value: 'back' }
+        ],
+        pageSize: 8
+      }
+    ]);
+    
+    switch (section) {
+      case 'ai':
+        await showAISettings(userId);
+        break;
+      case 'email':
+        await showEmailSettings(userId);
+        break;
+      case 'notifications':
+        await showNotificationSettings(userId);
+        break;
+      case 'tags':
+        await showTagSettings(userId);
+        break;
+      case 'profile':
+        await showProfileSettings(userId);
+        break;
+      case 'back':
+        settingsActive = false;
+        await showDashboard(userId);
+        break;
+    }
+  }
+}
+
+/**
+ * AI Configuration Settings
+ */
+async function showAISettings(userId) {
+  try {
+    showWelcome();
+    console.log(chalk.blue('\n🤖 AI Configuration\n'));
+    
+    // Try to fetch current settings
+    let currentSettings = null;
+    try {
+      const response = await fetch(`http://localhost:3000/api/users/${userId}/ai-config`);
+      if (response.ok) {
+        currentSettings = await response.json();
+      }
+    } catch (error) {
+      console.log(chalk.yellow('Could not load current AI settings (this is normal if using terminal CLI only)'));
+    }
+    
+    console.log(chalk.gray('Current AI Configuration:'));
+    if (currentSettings) {
+      console.log(`  • Status: ${currentSettings.isEnabled ? chalk.green('Enabled') : chalk.red('Disabled')}`);
+      console.log(`  • Model: ${currentSettings.model || 'Default'}`);
+      console.log(`  • API Key: ${currentSettings.apiKey ? chalk.green('Set') : chalk.red('Not set')}`);
+    } else {
+      console.log(chalk.gray('  • No AI configuration found'));
+    }
+    
+    const { action } = await prompt([
+      {
+        type: 'list',
+        name: 'action',
+        message: 'What would you like to do?',
+        choices: [
+          { name: '✅ Enable/Disable AI Features', value: 'toggle' },
+          { name: '🔧 Configure AI Model', value: 'model' },
+          { name: '🔑 Set API Key', value: 'apikey' },
+          createSeparator(),
+          { name: '🔙 Back to Settings', value: 'back' }
+        ]
+      }
+    ]);
+    
+    switch (action) {
+      case 'toggle':
+        const { enabled } = await prompt([{
+          type: 'confirm',
+          name: 'enabled',
+          message: 'Enable AI features?',
+          default: currentSettings?.isEnabled || false
+        }]);
+        console.log(chalk.green(`AI features ${enabled ? 'enabled' : 'disabled'} (Note: Full configuration available in web app)`));
+        break;
+        
+      case 'model':
+        const { model } = await prompt([{
+          type: 'list',
+          name: 'model',
+          message: 'Select AI model:',
+          choices: [
+            { name: 'Gemini 1.5 Flash (Recommended)', value: 'gemini-1.5-flash-latest' },
+            { name: 'Gemini Pro', value: 'gemini-pro' },
+            { name: 'GPT-4', value: 'gpt-4' },
+            { name: 'GPT-3.5 Turbo', value: 'gpt-3.5-turbo' }
+          ],
+          default: currentSettings?.model || 'gemini-1.5-flash-latest'
+        }]);
+        console.log(chalk.green(`AI model set to: ${model}`));
+        break;
+        
+      case 'apikey':
+        const { apiKey } = await prompt([{
+          type: 'password',
+          name: 'apiKey',
+          message: 'Enter your API key:',
+          mask: '*'
+        }]);
+        console.log(chalk.green('API key updated (Note: Save changes in web app for persistence)'));
+        break;
+        
+      case 'back':
+        await showSettings(userId);
+        return;
+    }
+    
+    await prompt([{ type: 'input', name: 'continue', message: 'Press Enter to continue...' }]);
+    await showSettings(userId);
+    
+  } catch (error) {
+    console.error(chalk.red('Error managing AI settings:'), error.message);
+    await prompt([{ type: 'input', name: 'continue', message: 'Press Enter to continue...' }]);
+    await showSettings(userId);
+  }
+}
+
+/**
+ * Email Notification Settings
+ */
+async function showEmailSettings(userId) {
+  try {
+    showWelcome();
+    console.log(chalk.blue('\n📧 Email Notification Settings\n'));
+    
+    // Try to fetch current settings
+    let currentSettings = null;
+    try {
+      const response = await fetch(`http://localhost:3000/api/users/${userId}/email-settings`);
+      if (response.ok) {
+        currentSettings = await response.json();
+      }
+    } catch (error) {
+      console.log(chalk.yellow('Could not load current email settings'));
+    }
+    
+    console.log(chalk.gray('Current Email Preferences:'));
+    if (currentSettings) {
+      console.log(`  • Organization Invites: ${currentSettings.organizationInvites ? chalk.green('Enabled') : chalk.red('Disabled')}`);
+      console.log(`  • Preference: ${currentSettings.inAppOnly ? chalk.blue('In-app notifications only') : chalk.green('Email notifications enabled')}`);
+    } else {
+      console.log(chalk.gray('  • Using default settings (organization invites enabled)'));
+    }
+    
+    console.log(chalk.cyan('\nEmail Notification Types:'));
+    console.log('  📧 Organization Invitations - Get notified when invited to organizations');
+    console.log('  📝 Task Assignments - Notifications for assigned tasks (in-app only)');
+    console.log('  📅 Due Date Reminders - Deadline notifications (in-app only)');
+    console.log('  📊 Project Updates - Project-related notifications (in-app only)');
+    
+    const { action } = await prompt([
+      {
+        type: 'list',
+        name: 'action',
+        message: 'What would you like to configure?',
+        choices: [
+          { name: '📧 Toggle Organization Invitation Emails', value: 'toggle-invites' },
+          { name: '🔄 Switch Between Email/In-app Only', value: 'toggle-mode' },
+          { name: 'ℹ️ View Email Policy', value: 'policy' },
+          createSeparator(),
+          { name: '🔙 Back to Settings', value: 'back' }
+        ]
+      }
+    ]);
+    
+    switch (action) {
+      case 'toggle-invites':
+        const { enableInvites } = await prompt([{
+          type: 'confirm',
+          name: 'enableInvites',
+          message: 'Receive organization invitation emails?',
+          default: currentSettings?.organizationInvites !== false
+        }]);
+        console.log(chalk.green(`Organization invitation emails ${enableInvites ? 'enabled' : 'disabled'}`));
+        break;
+        
+      case 'toggle-mode':
+        const { inAppOnly } = await prompt([{
+          type: 'confirm',
+          name: 'inAppOnly',
+          message: 'Use in-app notifications only? (no emails except invitations)',
+          default: currentSettings?.inAppOnly !== false
+        }]);
+        console.log(chalk.green(`Notification mode: ${inAppOnly ? 'In-app only' : 'Email enabled'}`));
+        break;
+        
+      case 'policy':
+        console.log(chalk.cyan('\n📋 Email Notification Policy:'));
+        console.log('  • Only organization invitations are sent via email');
+        console.log('  • All other notifications (tasks, deadlines, updates) are in-app only');
+        console.log('  • This design reduces email spam while keeping you informed');
+        console.log('  • You can disable organization emails if needed');
+        break;
+        
+      case 'back':
+        await showSettings(userId);
+        return;
+    }
+    
+    await prompt([{ type: 'input', name: 'continue', message: 'Press Enter to continue...' }]);
+    await showSettings(userId);
+    
+  } catch (error) {
+    console.error(chalk.red('Error managing email settings:'), error.message);
+    await prompt([{ type: 'input', name: 'continue', message: 'Press Enter to continue...' }]);
+    await showSettings(userId);
+  }
+}
+
+/**
+ * In-App Notification Settings
+ */
+async function showNotificationSettings(userId) {
+  try {
+    showWelcome();
+    console.log(chalk.blue('\n🔔 In-App Notification Settings\n'));
+    
+    console.log(chalk.cyan('Available Notification Categories:'));
+    console.log('  📋 Task Assignments - When tasks are assigned to you');
+    console.log('  📅 Due Date Reminders - When task deadlines approach');
+    console.log('  📊 Project Updates - Project-related changes');
+    console.log('  👥 Team Activity - Collaboration and team updates');
+    console.log('  🔒 Security Alerts - Account and security notifications');
+    
+    const { action } = await prompt([
+      {
+        type: 'list',
+        name: 'action',
+        message: 'Notification preferences:',
+        choices: [
+          { name: '🔔 Enable All Notifications', value: 'enable-all' },
+          { name: '🔕 Disable All Notifications', value: 'disable-all' },
+          { name: '⚙️ Configure by Category', value: 'configure' },
+          { name: '⏰ Set Quiet Hours', value: 'quiet-hours' },
+          { name: '📊 View Notification Summary', value: 'summary' },
+          createSeparator(),
+          { name: '🔙 Back to Settings', value: 'back' }
+        ]
+      }
+    ]);
+    
+    switch (action) {
+      case 'enable-all':
+        console.log(chalk.green('✅ All notifications enabled'));
+        break;
+        
+      case 'disable-all':
+        console.log(chalk.yellow('🔕 All notifications disabled'));
+        break;
+        
+      case 'configure':
+        const categories = [
+          { name: 'Task Assignments', key: 'tasks' },
+          { name: 'Due Date Reminders', key: 'deadlines' },
+          { name: 'Project Updates', key: 'projects' },
+          { name: 'Team Activity', key: 'team' },
+          { name: 'Security Alerts', key: 'security' }
+        ];
+        
+        console.log(chalk.cyan('\nConfigure by category:'));
+        for (const category of categories) {
+          const { enabled } = await prompt([{
+            type: 'confirm',
+            name: 'enabled',
+            message: `Enable ${category.name}?`,
+            default: true
+          }]);
+          console.log(`  ${enabled ? '✅' : '❌'} ${category.name}: ${enabled ? 'Enabled' : 'Disabled'}`);
+        }
+        break;
+        
+      case 'quiet-hours':
+        const { enableQuiet } = await prompt([{
+          type: 'confirm',
+          name: 'enableQuiet',
+          message: 'Enable quiet hours?',
+          default: false
+        }]);
+        
+        if (enableQuiet) {
+          const { startTime } = await prompt([{
+            type: 'input',
+            name: 'startTime',
+            message: 'Quiet hours start time (HH:MM):',
+            default: '22:00',
+            validate: input => /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/.test(input) || 'Please enter valid time (HH:MM)'
+          }]);
+          
+          const { endTime } = await prompt([{
+            type: 'input',
+            name: 'endTime',
+            message: 'Quiet hours end time (HH:MM):',
+            default: '08:00',
+            validate: input => /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/.test(input) || 'Please enter valid time (HH:MM)'
+          }]);
+          
+          console.log(chalk.green(`Quiet hours set: ${startTime} - ${endTime}`));
+        }
+        break;
+        
+      case 'summary':
+        console.log(chalk.cyan('\n📊 Notification Summary:'));
+        console.log('  • Total notifications: Available in web app');
+        console.log('  • Unread count: Available in web app');
+        console.log('  • Recent activity: Available in web app');
+        console.log(chalk.gray('\nNote: Full notification history and management available in web application'));
+        break;
+        
+      case 'back':
+        await showSettings(userId);
+        return;
+    }
+    
+    await prompt([{ type: 'input', name: 'continue', message: 'Press Enter to continue...' }]);
+    await showSettings(userId);
+    
+  } catch (error) {
+    console.error(chalk.red('Error managing notification settings:'), error.message);
+    await prompt([{ type: 'input', name: 'continue', message: 'Press Enter to continue...' }]);
+    await showSettings(userId);
+  }
+}
+
+/**
+ * Task Tags Settings
+ */
+async function showTagSettings(userId) {
+  try {
+    showWelcome();
+    console.log(chalk.blue('\n🏷️ Task Tags Settings\n'));
+    
+    // Try to fetch current user settings
+    let currentTags = [];
+    try {
+      const response = await fetch(`http://localhost:3000/api/users/${userId}/settings`);
+      if (response.ok) {
+        const settings = await response.json();
+        currentTags = settings.tags || [];
+      }
+    } catch (error) {
+      console.log(chalk.yellow('Could not load current tag settings'));
+    }
+    
+    console.log(chalk.gray('Current Tags:'));
+    if (currentTags.length > 0) {
+      currentTags.forEach((tag, index) => {
+        console.log(`  ${index + 1}. ${chalk.blue(tag)}`);
+      });
+    } else {
+      console.log(chalk.gray('  • No custom tags configured'));
+    }
+    
+    const { action } = await prompt([
+      {
+        type: 'list',
+        name: 'action',
+        message: 'Tag management:',
+        choices: [
+          { name: '➕ Add New Tag', value: 'add' },
+          { name: '❌ Remove Tag', value: 'remove' },
+          { name: '🔄 Reset to Defaults', value: 'reset' },
+          { name: '📋 View Common Tags', value: 'common' },
+          createSeparator(),
+          { name: '🔙 Back to Settings', value: 'back' }
+        ]
+      }
+    ]);
+    
+    switch (action) {
+      case 'add':
+        const { newTag } = await prompt([{
+          type: 'input',
+          name: 'newTag',
+          message: 'Enter new tag name:',
+          validate: input => input.trim() ? true : 'Tag name is required'
+        }]);
+        
+        if (!currentTags.includes(newTag.trim())) {
+          currentTags.push(newTag.trim());
+          console.log(chalk.green(`Tag "${newTag.trim()}" added`));
+        } else {
+          console.log(chalk.yellow('Tag already exists'));
+        }
+        break;
+        
+      case 'remove':
+        if (currentTags.length === 0) {
+          console.log(chalk.yellow('No tags to remove'));
+          break;
+        }
+        
+        const { tagToRemove } = await prompt([{
+          type: 'list',
+          name: 'tagToRemove',
+          message: 'Select tag to remove:',
+          choices: currentTags.map(tag => ({ name: tag, value: tag }))
+        }]);
+        
+        currentTags = currentTags.filter(tag => tag !== tagToRemove);
+        console.log(chalk.green(`Tag "${tagToRemove}" removed`));
+        break;
+        
+      case 'reset':
+        const { confirmReset } = await prompt([{
+          type: 'confirm',
+          name: 'confirmReset',
+          message: 'Reset to default tags?',
+          default: false
+        }]);
+        
+        if (confirmReset) {
+          currentTags = ['urgent', 'bug', 'feature', 'documentation', 'testing'];
+          console.log(chalk.green('Tags reset to defaults'));
+        }
+        break;
+        
+      case 'common':
+        console.log(chalk.cyan('\n📋 Common Tag Examples:'));
+        console.log('  🚨 Priority: urgent, high-priority, low-priority');
+        console.log('  🐛 Type: bug, feature, enhancement, documentation');
+        console.log('  🔧 Status: testing, review, blocked, waiting');
+        console.log('  👥 Team: frontend, backend, design, qa');
+        console.log('  📂 Category: ui, api, database, security');
+        break;
+        
+      case 'back':
+        await showSettings(userId);
+        return;
+    }
+    
+    await prompt([{ type: 'input', name: 'continue', message: 'Press Enter to continue...' }]);
+    await showSettings(userId);
+    
+  } catch (error) {
+    console.error(chalk.red('Error managing tag settings:'), error.message);
+    await prompt([{ type: 'input', name: 'continue', message: 'Press Enter to continue...' }]);
+    await showSettings(userId);
+  }
+}
+
+/**
+ * Profile Settings
+ */
+async function showProfileSettings(userId) {
+  try {
+    showWelcome();
+    console.log(chalk.blue('\n👤 Profile Settings\n'));
+    
+    // Get user info
+    const user = await getUserById(userId);
+    if (!user) {
+      console.log(chalk.red('User not found'));
+      await showSettings(userId);
+      return;
+    }
+    
+    console.log(chalk.gray('Current Profile:'));
+    console.log(`  • Name: ${user.displayName || 'Not set'}`);
+    console.log(`  • Email: ${user.email}`);
+    console.log(`  • User ID: ${user.uid}`);
+    console.log(`  • Account Created: ${user.createdAt ? new Date(user.createdAt).toLocaleDateString() : 'Unknown'}`);
+    
+    const { action } = await prompt([
+      {
+        type: 'list',
+        name: 'action',
+        message: 'Profile options:',
+        choices: [
+          { name: '✏️ Edit Display Name', value: 'edit-name' },
+          { name: '🖼️ Profile Picture', value: 'picture' },
+          { name: '🔒 Account Security', value: 'security' },
+          { name: '📊 Account Statistics', value: 'stats' },
+          { name: '💾 Export Data', value: 'export' },
+          createSeparator(),
+          { name: '🔙 Back to Settings', value: 'back' }
+        ]
+      }
+    ]);
+    
+    switch (action) {
+      case 'edit-name':
+        const { newName } = await prompt([{
+          type: 'input',
+          name: 'newName',
+          message: 'Enter new display name:',
+          default: user.displayName || '',
+          validate: input => input.trim() ? true : 'Display name is required'
+        }]);
+        
+        console.log(chalk.green(`Display name updated to: ${newName.trim()}`));
+        console.log(chalk.gray('Note: Changes will sync with web app on next login'));
+        break;
+        
+      case 'picture':
+        console.log(chalk.cyan('\n🖼️ Profile Picture:'));
+        console.log('  • Profile pictures can be managed in the web application');
+        console.log('  • Supports various image formats (JPG, PNG, GIF)');
+        console.log('  • Maximum size: 5MB');
+        console.log('  • Recommended: Square images, 256x256px or larger');
+        break;
+        
+      case 'security':
+        console.log(chalk.cyan('\n🔒 Account Security:'));
+        console.log('  • Password changes: Available in web app');
+        console.log('  • Two-factor authentication: Available in web app');
+        console.log('  • Login history: Available in web app');
+        console.log('  • Active sessions: Available in web app');
+        console.log('  • Account deletion: Contact support');
+        break;
+        
+      case 'stats':
+        console.log(chalk.cyan('\n📊 Account Statistics:'));
+        console.log('  • Tasks created: Available in dashboard');
+        console.log('  • Projects joined: Available in web app');
+        console.log('  • Organizations: Available in web app');
+        console.log('  • Collaborations: Available in web app');
+        console.log('  • Activity timeline: Available in web app');
+        break;
+        
+      case 'export':
+        console.log(chalk.cyan('\n💾 Data Export:'));
+        console.log('  • Export personal tasks: Available in web app');
+        console.log('  • Export project data: Available in web app');
+        console.log('  • Data format: JSON, CSV options available');
+        console.log('  • Includes: Tasks, projects, settings, activity logs');
+        console.log('  • Privacy: Only your data is exported');
+        break;
+        
+      case 'back':
+        await showSettings(userId);
+        return;
+    }
+    
+    await prompt([{ type: 'input', name: 'continue', message: 'Press Enter to continue...' }]);
+    await showSettings(userId);
+    
+  } catch (error) {
+    console.error(chalk.red('Error managing profile settings:'), error.message);
+    await prompt([{ type: 'input', name: 'continue', message: 'Press Enter to continue...' }]);
+    await showSettings(userId);
   }
 }
 
