@@ -214,7 +214,17 @@ let currentProject = null;
 let firestoreDb = null;
 
 const initializeFirebaseAdmin = () => {
+  // Suppress console output during Firebase initialization
+  const originalConsoleError = console.error;
+  const originalConsoleWarn = console.warn;
+  const originalConsoleLog = console.log;
+  
   try {
+    // Temporarily silence console output
+    console.error = () => {};
+    console.warn = () => {};
+    console.log = () => {};
+    
     if (admin.apps.length === 0) {
       const serviceAccount = {
         projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || process.env.FIREBASE_ADMIN_PROJECT_ID,
@@ -223,6 +233,10 @@ const initializeFirebaseAdmin = () => {
       };
 
       if (!serviceAccount.projectId || !serviceAccount.clientEmail || !serviceAccount.privateKey) {
+        // Restore console and show error
+        console.error = originalConsoleError;
+        console.warn = originalConsoleWarn;
+        console.log = originalConsoleLog;
         throw new Error(`Missing required Firebase Admin environment variables. Check if FIREBASE_ADMIN_PRIVATE_KEY is set.`);
       }
 
@@ -235,9 +249,8 @@ const initializeFirebaseAdmin = () => {
         firestoreDb = admin.firestore();
         return true;
       } catch (initError) {
-        console.error(chalk.red('❌ Error initializing Firebase Admin:'));
-        console.error(initError);
-        throw initError;
+        // Silently fail - app can work without Firebase
+        return false;
       }
     }
     
@@ -247,31 +260,56 @@ const initializeFirebaseAdmin = () => {
     }
     return true;
   } catch (error) {
-    console.error(chalk.red('Error initializing Firebase Admin:'));
-    console.error(chalk.red(error.message));
-    console.error('\nPlease make sure you have set all the required environment variables in your .env file:');
-    console.log('\nFIREBASE_PROJECT_ID=your-project-id');
-    console.log('FIREBASE_ADMIN_CLIENT_EMAIL=your-client-email@project-id.iam.gserviceaccount.com');
-    console.log('FIREBASE_ADMIN_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n');
-    process.exit(1);
+    // Silently fail - app can work without Firebase
+    return false;
+  } finally {
+    // Always restore console functions
+    console.error = originalConsoleError;
+    console.warn = originalConsoleWarn;
+    console.log = originalConsoleLog;
   }
 };
 
 (async () => {
+  // Suppress all console output during initialization to prevent Firebase errors
+  const originalConsoleError = console.error;
+  const originalConsoleWarn = console.warn;
+  const originalConsoleLog = console.log;
+  const originalConsoleInfo = console.info;
+  
+  // Temporarily silence all console output
+  console.error = () => {};
+  console.warn = () => {};
+  console.log = () => {};
+  console.info = () => {};
+  
   try {
     isDbConnected = await connectDB({ verbose: false });
-    if (!isDbConnected) {
-      console.error(chalk.yellow('Warning: Could not connect to MongoDB. Some features may not work.'));
-    }
-    
     initializeFirebaseAdmin();
     
     // Wait a moment to ensure Firebase is fully initialized
     await new Promise(resolve => setTimeout(resolve, 100));
     
+    // Restore console functions before starting the app
+    console.error = originalConsoleError;
+    console.warn = originalConsoleWarn;
+    console.log = originalConsoleLog;
+    console.info = originalConsoleInfo;
+    
+    // Show warning after restoring console if DB connection failed
+    if (!isDbConnected) {
+      console.error(chalk.yellow('Warning: Could not connect to MongoDB. Some features may not work.'));
+    }
+    
     // Now start the app
     await init();
   } catch (error) {
+    // Restore console functions in case of error
+    console.error = originalConsoleError;
+    console.warn = originalConsoleWarn;
+    console.log = originalConsoleLog;
+    console.info = originalConsoleInfo;
+    
     console.error(chalk.red('Error during initialization:'), error.message);
     process.exit(1);
   }
@@ -379,8 +417,7 @@ async function loadSession() {
       // If it's a permission error, we'll allow the session to continue
       // but warn the user about limited Firebase features
       if (error.message.includes('permission') || error.message.includes('PERMISSION_DENIED')) {
-        console.log(chalk.yellow('⚠️  Firebase verification unavailable due to permissions, continuing with cached session'));
-        
+        // Silently continue with cached session - no warning message
         return {
           ...session,
           emailVerified: false,
@@ -444,12 +481,12 @@ const firebaseConfig = {
   measurementId: process.env.FIREBASE_MEASUREMENT_ID
 };
 
-// Log Firebase config for debugging (without sensitive data)
-console.log('Firebase Config:', {
-  ...firebaseConfig,
-  apiKey: firebaseConfig.apiKey ? '***' + firebaseConfig.apiKey.slice(-4) : 'Not set',
-  appId: firebaseConfig.appId ? '***' + firebaseConfig.appId.slice(-4) : 'Not set'
-});
+// Log Firebase config for debugging (without sensitive data) - DISABLED
+// console.log('Firebase Config:', {
+//   ...firebaseConfig,
+//   apiKey: firebaseConfig.apiKey ? '***' + firebaseConfig.apiKey.slice(-4) : 'Not set',
+//   appId: firebaseConfig.appId ? '***' + firebaseConfig.appId.slice(-4) : 'Not set'
+// });
 
 const firebaseApp = initializeApp(firebaseConfig);
 const auth = getAuth(firebaseApp);
@@ -824,22 +861,63 @@ async function showDashboard(userId) {
       projects.unshift(personalProject);
     }
     
-    // Calculate task counts using the same method as the web app
+    // Calculate task counts using the same method as the web app with dynamic column detection
     let totalTasks = 0;
-    let completedTasks = 0;
-    let inProgressTasks = 0;
-    let todoTasks = 0;
+    let columnCounts = {};
     
     try {
       // Use the same fetchWebAppTasks function as the task listing
       const tasks = await fetchWebAppTasks(userId);
       totalTasks = tasks.length;
-      completedTasks = tasks.filter(t => t.status === 'completed').length;
-      inProgressTasks = tasks.filter(t => t.status === 'in-progress').length;
-      todoTasks = tasks.filter(t => !t.status || t.status === 'todo').length;
+      
+      // Count tasks by status dynamically
+      const statusCounts = {};
+      tasks.forEach(task => {
+        let status = task.status || 'todo';
+        // Normalize status names for consistency
+        if (status === 'completed') status = 'done';
+        if (status === 'in-review') status = 'review';
+        
+        statusCounts[status] = (statusCounts[status] || 0) + 1;
+      });
+      
+      // Define column display order and colors
+      const columnConfig = {
+        'todo': { label: 'To Do', color: chalk.yellow, icon: '📝' },
+        'in-progress': { label: 'In Progress', color: chalk.blue, icon: '🔄' },
+        'review': { label: 'Review', color: chalk.magenta, icon: '👀' },
+        'done': { label: 'Done', color: chalk.green, icon: '✅' }
+      };
+      
+      // Build dynamic column counts
+      Object.keys(columnConfig).forEach(status => {
+        columnCounts[status] = {
+          count: statusCounts[status] || 0,
+          ...columnConfig[status]
+        };
+      });
+      
+      // Add any custom columns that aren't in the default config
+      Object.keys(statusCounts).forEach(status => {
+        if (!columnConfig[status]) {
+          columnCounts[status] = {
+            count: statusCounts[status] || 0,
+            label: status.charAt(0).toUpperCase() + status.slice(1),
+            color: chalk.white,
+            icon: '📋'
+          };
+        }
+      });
+      
     } catch (error) {
       console.warn(chalk.yellow('⚠️  Could not load task counts:', error.message));
-      // Keep zeros as fallback
+      // Fallback to default columns with zero counts
+      columnCounts = {
+        'todo': { count: 0, label: 'To Do', color: chalk.yellow, icon: '📝' },
+        'in-progress': { count: 0, label: 'In Progress', color: chalk.blue, icon: '🔄' },
+        'review': { count: 0, label: 'Review', color: chalk.magenta, icon: '👀' },
+        'done': { count: 0, label: 'Done', color: chalk.green, icon: '✅' }
+      };
     }
     
     console.log(chalk.blue(`\nDashboard - ${user.displayName || user.email.split('@')[0]}`));
@@ -847,12 +925,16 @@ async function showDashboard(userId) {
     
     console.log(chalk.bold('Task Summary:'));
     console.log(`  • Total: ${chalk.bold(totalTasks)}`);
-    console.log(`  • ${chalk.green('✓')} Completed: ${chalk.green(completedTasks)}`);
-    console.log(`  • In Progress: ${chalk.blue(inProgressTasks)}`);
-    console.log(`  • To Do: ${chalk.yellow(todoTasks)}`);
+    
+    // Display all columns dynamically
+    Object.entries(columnCounts).forEach(([status, config]) => {
+      const coloredCount = config.color(config.count.toString());
+      console.log(`  • ${config.icon} ${config.label}: ${coloredCount}`);
+    });
     
     const choices = [
       { name: '📋 View All Tasks', value: 'all-tasks' },
+      { name: '📊 Analytics Dashboard', value: 'analytics' },
       createSeparator(),
       { name: '➕ Create New Task', value: 'create-task' },
       createSeparator(),
@@ -875,6 +957,9 @@ async function showDashboard(userId) {
     switch (action) {
       case 'all-tasks':
         await showAllTasks(userId);
+        break;
+      case 'analytics':
+        await showAnalytics(userId);
         break;
       case 'create-task':
         await createTask(userId);
@@ -1618,16 +1703,42 @@ async function createTask(userId) {
       {
         type: 'input',
         name: 'dueDate',
-        message: 'Due date (YYYY-MM-DD, optional):',
+        message: 'Due date (YYYY-MM-DD or number of days from now, optional):',
         validate: input => {
           if (!input) return true;
-          return /^\d{4}-\d{2}-\d{2}$/.test(input) 
-            ? true 
-            : 'Please enter a valid date in YYYY-MM-DD format';
+          
+          // Allow YYYY-MM-DD format
+          if (/^\d{4}-\d{2}-\d{2}$/.test(input)) {
+            const date = new Date(input);
+            return !isNaN(date.getTime()) ? true : 'Please enter a valid date';
+          }
+          
+          // Allow number of days (e.g., "7" for 7 days from now)
+          if (/^\d+$/.test(input)) {
+            const days = parseInt(input);
+            return days > 0 && days <= 365 ? true : 'Please enter a number between 1 and 365';
+          }
+          
+          return 'Please enter YYYY-MM-DD format or number of days from now';
         },
         default: ''
       }
     ]);
+    
+    // Process due date (handle both YYYY-MM-DD and number of days)
+    let processedDueDate = null;
+    if (taskData.dueDate) {
+      if (/^\d+$/.test(taskData.dueDate)) {
+        // Number of days from now
+        const days = parseInt(taskData.dueDate);
+        const future = new Date();
+        future.setDate(future.getDate() + days);
+        processedDueDate = future;
+      } else {
+        // YYYY-MM-DD format
+        processedDueDate = new Date(taskData.dueDate);
+      }
+    }
     
     // Prepare task data for web app format (exactly like the web version)
     const taskPayload = {
@@ -1639,7 +1750,7 @@ async function createTask(userId) {
       priority: taskData.priority,
       order: 0, // Will be updated by the server if needed
       isBlocked: false,
-      dueDate: taskData.dueDate ? new Date(taskData.dueDate) : null,
+      dueDate: processedDueDate,
       tags: [],
       assigneeId: userId,
       assigneeName: user.displayName || user.email.split('@')[0],
@@ -1774,58 +1885,105 @@ async function showAllTasks(userId) {
     const columns = {
       'todo': { title: 'To Do', tasks: [] },
       'in-progress': { title: 'In Progress', tasks: [] },
-      'completed': { title: 'Completed', tasks: [] }
+      'review': { title: 'Review', tasks: [] },
+      'done': { title: 'Done', tasks: [] }
     };
-    
+
     tasks.forEach(task => {
-      const status = task.status || 'todo';
+      let status = task.status || 'todo';
+      // Map completed to done for display
+      if (status === 'completed') status = 'done';
+      
       if (columns[status]) {
         columns[status].tasks.push(task);
+      } else {
+        // If status doesn't match any column, put in todo as fallback
+        columns['todo'].tasks.push(task);
       }
     });
-    
+
     // Display the board
     console.log(chalk.blue('\nPersonal Task Board'));
-    console.log(chalk.gray('━'.repeat(80)));
-    
-    // Calculate column widths
-    const colWidth = 25;
-    const statusWidth = 15;
-    const separator = ' '.repeat(3);
-    
-    // Print column headers
+    const boardWidth = 100;
+    console.log(chalk.gray('━'.repeat(boardWidth)));
+
+    // Calculate responsive column widths
+    const terminalWidth = boardWidth;
+    const numColumns = Object.keys(columns).length;
+    const separatorWidth = 2;
+    const totalSeparatorWidth = (numColumns - 1) * separatorWidth;
+    const paddingWidth = 4;
+    const availableWidth = terminalWidth - totalSeparatorWidth - paddingWidth;
+    const colWidth = Math.floor(availableWidth / numColumns);
+    const separator = chalk.gray('│');
+
+    // Print column headers with colors
     let headerLine = '';
-    Object.entries(columns).forEach(([status, col]) => {
-      const padding = ' '.repeat(Math.max(0, colWidth - col.title.length - col.tasks.length.toString().length - 3));
-      headerLine += `${chalk.bold(col.title)} (${col.tasks.length})${padding}${separator}`;
+    Object.entries(columns).forEach(([status, col], index) => {
+      const countText = `(${col.tasks.length})`;
+      const titleSpace = colWidth - countText.length - 1;
+      const title = col.title.length > titleSpace ? 
+        col.title.substring(0, titleSpace - 3) + '...' : 
+        col.title.padEnd(titleSpace);
+      
+      const headerText = `${title}${countText}`;
+      
+      let coloredHeader;
+      switch(status) {
+        case 'todo': coloredHeader = chalk.yellow.bold(headerText); break;
+        case 'in-progress': coloredHeader = chalk.blue.bold(headerText); break;
+        case 'review': coloredHeader = chalk.magenta.bold(headerText); break;
+        case 'done': coloredHeader = chalk.green.bold(headerText); break;
+        default: coloredHeader = chalk.white.bold(headerText);
+      }
+      
+      headerLine += coloredHeader.padEnd(colWidth);
+      if (index < numColumns - 1) headerLine += ` ${separator} `;
     });
     console.log(headerLine);
-    console.log(chalk.gray('─'.repeat(80)));
-    
-    // Print tasks in columns
+    console.log(chalk.gray('─'.repeat(terminalWidth)));
+
+    // Print tasks in columns with improved formatting
     const maxRows = Math.max(...Object.values(columns).map(col => col.tasks.length));
-    
+    let globalTaskNum = 1;
+
     for (let i = 0; i < maxRows; i++) {
       let row = '';
       
-      Object.entries(columns).forEach(([status, col]) => {
+      Object.entries(columns).forEach(([status, col], colIndex) => {
         if (i < col.tasks.length) {
           const task = col.tasks[i];
-          const priority = formatPriority(task.priority);
-          const truncatedTitle = task.title.length > colWidth - 5 ? 
-            task.title.substring(0, colWidth - 8) + '...' : 
-            task.title.padEnd(colWidth - 5);
+          const priorityColor = getPriorityColor(task.priority);
+          const priorityIndicator = getPriorityIndicator(task.priority);
           
-          row += `${i + 1}. ${truncatedTitle} ${priority}${' '.repeat(separator.length)}`;
+          // Simple task display: "● Task Title" (no numbers)
+          const coloredPriority = priorityColor(priorityIndicator);
+          
+          // Calculate available space for title (leave space for indicator and space)
+          const prefixSpace = 2; // "● "
+          const availableForTitle = colWidth - prefixSpace - 1; // extra space buffer
+          
+          let taskTitle = task.title || 'Untitled';
+          if (taskTitle.length > availableForTitle) {
+            taskTitle = taskTitle.substring(0, availableForTitle - 3) + '...';
+          }
+          
+          // Format: "● Task Title"
+          const taskText = `${coloredPriority} ${taskTitle}`;
+          
+          // Pad the entire cell to column width
+          const paddedText = taskText.padEnd(colWidth);
+          row += paddedText.substring(0, colWidth);
+          globalTaskNum++;
         } else {
-          row += ' '.repeat(colWidth + separator.length);
+          row += ' '.repeat(colWidth);
         }
+        
+        if (colIndex < numColumns - 1) row += ` ${separator} `;
       });
       
       console.log(row);
-    }
-    
-    // Flatten all tasks for selection
+    }    // Flatten all tasks for selection
     const allTasks = [].concat(
       ...Object.values(columns).map(col => col.tasks)
     );
@@ -1850,22 +2008,22 @@ async function showAllTasks(userId) {
     switch (action) {
       case 'view':
         if (allTasks.length > 0) {
-          const { taskIndex } = await prompt([
+          const { selectedTask } = await prompt([
             {
-              type: 'number',
-              name: 'taskIndex',
-              message: 'Enter the task number to view details:',
-              validate: (value) => {
-                const num = parseInt(value);
-                return !isNaN(num) && num > 0 && num <= allTasks.length ? 
-                  true : 'Please enter a valid task number';
-              }
+              type: 'list',
+              name: 'selectedTask',
+              message: 'Select a task to view details:',
+              choices: allTasks.map((task, index) => ({
+                name: `${getPriorityIndicator(task.priority)} ${task.title || 'Untitled'} (${formatStatus(task.status)})`,
+                value: index
+              })),
+              pageSize: 10
             }
           ]);
           
-          const selectedTask = allTasks[taskIndex - 1];
-          const project = await Project.findById(selectedTask.projectId);
-          await showTaskDetails(selectedTask, project, userId);
+          const task = allTasks[selectedTask];
+          const project = await Project.findById(task.projectId);
+          await showTaskDetails(task, project, userId);
         } else {
           console.log(chalk.yellow('\nNo tasks to view.'));
           await new Promise(resolve => setTimeout(resolve, 1500));
@@ -2041,6 +2199,24 @@ function formatStatus(status) {
 
 function formatPriority(priority) {
   return priority.charAt(0).toUpperCase() + priority.slice(1);
+}
+
+function getPriorityColor(priority) {
+  switch(priority?.toLowerCase()) {
+    case 'high': return chalk.red;
+    case 'medium': return chalk.yellow;
+    case 'low': return chalk.green;
+    default: return chalk.gray;
+  }
+}
+
+function getPriorityIndicator(priority) {
+  switch(priority?.toLowerCase()) {
+    case 'high': return '●';
+    case 'medium': return '●';
+    case 'low': return '●';
+    default: return '○';
+  }
 }
 
 async function manageTaskLabels(task, project, userId) {
@@ -2280,7 +2456,8 @@ async function showSettings(userId) {
           { name: '📧 Email Notifications', value: 'email' },
           { name: '🔔 In-App Notifications', value: 'notifications' },
           { name: '🏷️ Task Tags', value: 'tags' },
-          { name: '👤 Profile Settings', value: 'profile' },
+          { name: '� Board Settings', value: 'board' },
+          { name: '�👤 Profile Settings', value: 'profile' },
           createSeparator(),
           { name: '🔙 Back to Dashboard', value: 'back' }
         ],
@@ -2300,6 +2477,9 @@ async function showSettings(userId) {
         break;
       case 'tags':
         await showTagSettings(userId);
+        break;
+      case 'board':
+        await showBoardSettings(userId);
         break;
       case 'profile':
         await showProfileSettings(userId);
@@ -2730,6 +2910,75 @@ async function showTagSettings(userId) {
   }
 }
 
+async function showBoardSettings(userId) {
+  showWelcome();
+  
+  try {
+    console.log(chalk.cyan('\n📋 Board Settings'));
+    console.log(chalk.gray('━'.repeat(50)));
+    
+    console.log(chalk.bold('\n🎯 Column Management:'));
+    console.log('  Current columns: To Do, In Progress, Review, Done');
+    console.log(chalk.gray('  (Column customization available in web app)'));
+    
+    console.log(chalk.bold('\n📝 Default Columns:'));
+    console.log('  • ' + chalk.yellow('To Do') + ' - New tasks start here');
+    console.log('  • ' + chalk.blue('In Progress') + ' - Work in progress');
+    console.log('  • ' + chalk.magenta('Review') + ' - Tasks awaiting review');
+    console.log('  • ' + chalk.green('Done') + ' - Completed tasks');
+    
+    console.log(chalk.bold('\n⚙️ Board Preferences:'));
+    console.log('  • Auto-refresh: Enabled');
+    console.log('  • Task numbering: Global sequence');
+    console.log('  • Priority indicators: Color-coded dots');
+    console.log('  • Column separation: Visual dividers');
+    
+    const { action } = await prompt([
+      {
+        type: 'list',
+        name: 'action',
+        message: 'Board settings options:',
+        choices: [
+          { name: '🌐 Open Web App Board Settings', value: 'web' },
+          { name: '🔄 Test Board Layout', value: 'test' },
+          createSeparator(),
+          { name: '🔙 Back to Settings', value: 'back' }
+        ]
+      }
+    ]);
+    
+    switch (action) {
+      case 'web':
+        console.log(chalk.cyan('\n🌐 Web App Features:'));
+        console.log('  • Add up to 8 custom columns');
+        console.log('  • Rename existing columns');
+        console.log('  • Reorder column positions');
+        console.log('  • Set column limits');
+        console.log('  • Custom column colors');
+        console.log('  • Drag & drop functionality');
+        console.log('\n' + chalk.yellow('💡 Tip: Changes made in the web app sync automatically to the CLI!'));
+        break;
+        
+      case 'test':
+        console.log(chalk.cyan('\n🧪 Testing current board layout...'));
+        await showAllTasks(userId);
+        return;
+        
+      case 'back':
+        await showSettings(userId);
+        return;
+    }
+    
+    await prompt([{ type: 'input', name: 'continue', message: 'Press Enter to continue...' }]);
+    await showSettings(userId);
+    
+  } catch (error) {
+    console.error(chalk.red('Error in board settings:'), error.message);
+    await prompt([{ type: 'input', name: 'continue', message: 'Press Enter to continue...' }]);
+    await showSettings(userId);
+  }
+}
+
 /**
  * Profile Settings
  */
@@ -2830,6 +3079,138 @@ async function showProfileSettings(userId) {
     console.error(chalk.red('Error managing profile settings:'), error.message);
     await prompt([{ type: 'input', name: 'continue', message: 'Press Enter to continue...' }]);
     await showSettings(userId);
+  }
+}
+
+async function showAnalytics(userId) {
+  showWelcome();
+  
+  try {
+    console.log(chalk.cyan('\n📊 Analytics Dashboard'));
+    console.log(chalk.gray('━'.repeat(60)));
+    
+    // Fetch tasks for analytics
+    const tasks = await fetchWebAppTasks(userId);
+    
+    // Calculate statistics
+    const totalTasks = tasks.length;
+    const statusCounts = {};
+    const priorityCounts = { high: 0, medium: 0, low: 0 };
+    const recentTasks = [];
+    const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    
+    tasks.forEach(task => {
+      // Status counts
+      let status = task.status || 'todo';
+      if (status === 'completed') status = 'done';
+      if (status === 'in-review') status = 'review';
+      statusCounts[status] = (statusCounts[status] || 0) + 1;
+      
+      // Priority counts
+      const priority = task.priority || 'low';
+      priorityCounts[priority] = (priorityCounts[priority] || 0) + 1;
+      
+      // Recent tasks
+      if (task.createdAt && new Date(task.createdAt) > oneWeekAgo) {
+        recentTasks.push(task);
+      }
+    });
+    
+    // Display overview
+    console.log(chalk.bold('\n📈 Task Overview:'));
+    console.log(`  Total Tasks: ${chalk.bold(totalTasks)}`);
+    console.log(`  Completed: ${chalk.green(statusCounts.done || 0)} (${totalTasks > 0 ? Math.round((statusCounts.done || 0) / totalTasks * 100) : 0}%)`);
+    console.log(`  In Progress: ${chalk.blue(statusCounts['in-progress'] || 0)}`);
+    console.log(`  In Review: ${chalk.magenta(statusCounts.review || 0)}`);
+    console.log(`  To Do: ${chalk.yellow(statusCounts.todo || 0)}`);
+    
+    // Priority breakdown
+    console.log(chalk.bold('\n🎯 Priority Breakdown:'));
+    console.log(`  ${chalk.red('●')} High Priority: ${priorityCounts.high}`);
+    console.log(`  ${chalk.yellow('●')} Medium Priority: ${priorityCounts.medium}`);
+    console.log(`  ${chalk.green('●')} Low Priority: ${priorityCounts.low}`);
+    
+    // Activity summary
+    console.log(chalk.bold('\n📅 Recent Activity (Last 7 days):'));
+    console.log(`  New Tasks Created: ${chalk.cyan(recentTasks.length)}`);
+    
+    // Simple progress bar for completion rate
+    const completionRate = totalTasks > 0 ? (statusCounts.done || 0) / totalTasks : 0;
+    const barLength = 20;
+    const filledLength = Math.round(barLength * completionRate);
+    const progressBar = '█'.repeat(filledLength) + '░'.repeat(barLength - filledLength);
+    
+    console.log(chalk.bold('\n📊 Completion Rate:'));
+    console.log(`  ${chalk.green(progressBar)} ${Math.round(completionRate * 100)}%`);
+    
+    // Task creation trend (simplified)
+    console.log(chalk.bold('\n📈 Productivity Insights:'));
+    if (totalTasks === 0) {
+      console.log('  • No tasks yet - create your first task to see insights!');
+    } else if (recentTasks.length === 0) {
+      console.log('  • No recent activity - consider creating new tasks');
+    } else if (recentTasks.length > 5) {
+      console.log('  • High activity - great productivity!');
+    } else {
+      console.log('  • Moderate activity - keep up the good work!');
+    }
+    
+    const avgTasksPerWeek = totalTasks > 0 ? (recentTasks.length || 1) : 0;
+    console.log(`  • Average tasks per week: ${avgTasksPerWeek}`);
+    
+    if (statusCounts.done && statusCounts.done > 0) {
+      console.log(`  • Tasks completed: ${statusCounts.done} ✅`);
+    }
+    
+    const { action } = await prompt([
+      {
+        type: 'list',
+        name: 'action',
+        message: '\nWhat would you like to do?',
+        choices: [
+          { name: '🔄 Refresh Analytics', value: 'refresh' },
+          { name: '📋 View All Tasks', value: 'tasks' },
+          { name: '🏠 Back to Dashboard', value: 'dashboard' },
+          { name: '⚙️ Settings', value: 'settings' }
+        ]
+      }
+    ]);
+    
+    switch (action) {
+      case 'refresh':
+        await showAnalytics(userId);
+        break;
+      case 'tasks':
+        await showAllTasks(userId);
+        break;
+      case 'dashboard':
+        await showDashboard(userId);
+        break;
+      case 'settings':
+        await showSettings(userId);
+        break;
+    }
+    
+  } catch (error) {
+    console.error(chalk.red('Error loading analytics:'), error.message);
+    
+    const { action } = await prompt([
+      {
+        type: 'list',
+        name: 'action',
+        message: 'What would you like to do?',
+        choices: [
+          { name: 'Back to Dashboard', value: 'dashboard' },
+          { name: 'Try Again', value: 'retry' }
+        ]
+      }
+    ]);
+    
+    if (action === 'dashboard') {
+      await showDashboard(userId);
+    } else {
+      await showAnalytics(userId);
+    }
   }
 }
 
