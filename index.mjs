@@ -883,10 +883,10 @@ async function showDashboard(userId) {
       
       // Define column display order and colors
       const columnConfig = {
-        'todo': { label: 'To Do', color: chalk.yellow, icon: '📝' },
-        'in-progress': { label: 'In Progress', color: chalk.blue, icon: '🔄' },
-        'review': { label: 'Review', color: chalk.magenta, icon: '👀' },
-        'done': { label: 'Done', color: chalk.green, icon: '✅' }
+        'todo': { label: 'To Do', color: chalk.yellow, icon: '' },
+        'in-progress': { label: 'In Progress', color: chalk.blue, icon: '' },
+        'review': { label: 'Review', color: chalk.magenta, icon: '' },
+        'done': { label: 'Done', color: chalk.green, icon: '✓' }
       };
       
       // Build dynamic column counts
@@ -913,10 +913,10 @@ async function showDashboard(userId) {
       console.warn(chalk.yellow('⚠️  Could not load task counts:', error.message));
       // Fallback to default columns with zero counts
       columnCounts = {
-        'todo': { count: 0, label: 'To Do', color: chalk.yellow, icon: '📝' },
-        'in-progress': { count: 0, label: 'In Progress', color: chalk.blue, icon: '🔄' },
-        'review': { count: 0, label: 'Review', color: chalk.magenta, icon: '👀' },
-        'done': { count: 0, label: 'Done', color: chalk.green, icon: '✅' }
+        'todo': { count: 0, label: 'To Do', color: chalk.yellow, icon: '' },
+        'in-progress': { count: 0, label: 'In Progress', color: chalk.blue, icon: '' },
+        'review': { count: 0, label: 'Review', color: chalk.magenta, icon: '' },
+        'done': { count: 0, label: 'Done', color: chalk.green, icon: '✓' }
       };
     }
     
@@ -929,19 +929,20 @@ async function showDashboard(userId) {
     // Display all columns dynamically
     Object.entries(columnCounts).forEach(([status, config]) => {
       const coloredCount = config.color(config.count.toString());
-      console.log(`  • ${config.icon} ${config.label}: ${coloredCount}`);
+      const displayText = config.icon ? `${config.icon} ${config.label}` : config.label;
+      console.log(`  • ${displayText}: ${coloredCount}`);
     });
     
     const choices = [
-      { name: '📋 View All Tasks', value: 'all-tasks' },
-      { name: '📊 Analytics Dashboard', value: 'analytics' },
+      { name: 'View All Tasks', value: 'all-tasks' },
+      { name: 'Analytics Dashboard', value: 'analytics' },
       createSeparator(),
-      { name: '➕ Create New Task', value: 'create-task' },
+      { name: 'Create New Task', value: 'create-task' },
       createSeparator(),
-      { name: '👤 View Profile', value: 'profile' },
-      { name: '⚙️ Settings', value: 'settings' },
-      { name: '🚪 Logout', value: 'logout' },
-      { name: '❌ Exit', value: 'exit' }
+      { name: 'View Profile', value: 'profile' },
+      { name: 'Settings', value: 'settings' },
+      { name: 'Logout', value: 'logout' },
+      { name: 'Exit', value: 'exit' }
     ];
     
     const { action } = await prompt([
@@ -1804,9 +1805,9 @@ async function createTask(userId) {
         name: 'nextAction',
         message: 'What would you like to do next?',
         choices: [
-          { name: '➕ Create another task', value: 'another' },
-          { name: '📋 View all tasks', value: 'view' },
-          { name: '🏠 Return to dashboard', value: 'dashboard' }
+          { name: 'Create another task', value: 'another' },
+          { name: 'View all tasks', value: 'view' },
+          { name: 'Return to dashboard', value: 'dashboard' }
         ]
       }
     ]);
@@ -1867,8 +1868,8 @@ async function showAllTasks(userId) {
           name: 'action',
           message: 'What would you like to do?',
           choices: [
-            { name: '➕ Create a new task', value: 'create' },
-            { name: '🔙 Go back to dashboard', value: 'back' }
+            { name: 'Create a new task', value: 'create' },
+            { name: 'Go back to dashboard', value: 'back' }
           ]
         }
       ]);
@@ -1924,9 +1925,9 @@ async function showAllTasks(userId) {
       const titleSpace = colWidth - countText.length - 1;
       const title = col.title.length > titleSpace ? 
         col.title.substring(0, titleSpace - 3) + '...' : 
-        col.title.padEnd(titleSpace);
+        col.title;
       
-      const headerText = `${title}${countText}`;
+      const headerText = `${title} ${countText}`;
       
       let coloredHeader;
       switch(status) {
@@ -1937,7 +1938,9 @@ async function showAllTasks(userId) {
         default: coloredHeader = chalk.white.bold(headerText);
       }
       
-      headerLine += coloredHeader.padEnd(colWidth);
+      // Pad the header to exact column width
+      const paddedHeader = headerText.padEnd(colWidth);
+      headerLine += coloredHeader.replace(headerText, paddedHeader);
       if (index < numColumns - 1) headerLine += ` ${separator} `;
     });
     console.log(headerLine);
@@ -1998,8 +2001,7 @@ async function showAllTasks(userId) {
           { name: 'View Task Details', value: 'view' },
           { name: 'Create New Task', value: 'create' },
           { name: 'Refresh', value: 'refresh' },
-          { name: 'Back to Dashboard', value: 'dashboard' },
-          { name: 'Logout', value: 'logout' }
+          { name: 'Back to Dashboard', value: 'dashboard' }
         ],
         pageSize: 10
       }
@@ -2022,7 +2024,25 @@ async function showAllTasks(userId) {
           ]);
           
           const task = allTasks[selectedTask];
-          const project = await Project.findById(task.projectId);
+          
+          // Handle personal tasks (projectId is 'personal' string, not ObjectId)
+          let project = null;
+          if (task.projectId && task.projectId !== 'personal') {
+            try {
+              project = await Project.findById(task.projectId);
+            } catch (error) {
+              console.warn(chalk.yellow('Could not load project details'));
+            }
+          }
+          
+          // For personal tasks, create a mock project object
+          if (!project) {
+            project = {
+              name: 'Personal Tasks',
+              isPersonal: true
+            };
+          }
+          
           await showTaskDetails(task, project, userId);
         } else {
           console.log(chalk.yellow('\nNo tasks to view.'));
@@ -2041,10 +2061,6 @@ async function showAllTasks(userId) {
         
       case 'dashboard':
         await showDashboard(userId);
-        break;
-        
-      case 'logout':
-        await handleLogout();
         break;
     }
     
@@ -2452,14 +2468,14 @@ async function showSettings(userId) {
         name: 'section',
         message: 'Choose a settings section:',
         choices: [
-          { name: '🤖 AI Configuration', value: 'ai' },
-          { name: '📧 Email Notifications', value: 'email' },
-          { name: '🔔 In-App Notifications', value: 'notifications' },
-          { name: '🏷️ Task Tags', value: 'tags' },
-          { name: '� Board Settings', value: 'board' },
-          { name: '�👤 Profile Settings', value: 'profile' },
+          { name: 'AI Configuration', value: 'ai' },
+          { name: 'Email Notifications', value: 'email' },
+          { name: 'In-App Notifications', value: 'notifications' },
+          { name: 'Task Tags', value: 'tags' },
+          { name: 'Board Settings', value: 'board' },
+          { name: 'Profile Settings', value: 'profile' },
           createSeparator(),
-          { name: '🔙 Back to Dashboard', value: 'back' }
+          { name: 'Back to Dashboard', value: 'back' }
         ],
         pageSize: 8
       }
