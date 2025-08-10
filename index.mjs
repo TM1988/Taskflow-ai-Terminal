@@ -9,7 +9,7 @@ import { stdin as input, stdout as output } from 'process';
 import figlet from 'figlet';
 import clear from 'clear';
 import { promises as fs } from 'fs';
-import { 
+import {
   connectDB, 
   saveUser, 
   getUserById, 
@@ -28,6 +28,71 @@ import {
   Task,
   User 
 } from './utils/db.mjs';
+
+/**
+ * Fetches all projects for a specific user
+ * @param {string} userId - The ID of the user
+ * @returns {Promise<Array>} Array of project documents
+ */
+async function getProjectsByUser(userId) {
+  try {
+    return await Project.find({
+      $or: [
+        { createdBy: userId },
+        { members: userId }
+      ]
+    }).sort({ isPersonal: -1, name: 1 }); // Personal projects first, then sort by name
+  } catch (error) {
+    console.error('Error getting projects by user:', error);
+    throw error;
+  }
+}
+
+/**
+ * Creates a personal project for a user if one doesn't exist
+ * @param {string} userId - The Firebase UID of the user
+ * @returns {Promise<Object>} The created or existing personal project
+ */
+async function createPersonalProject(userId) {
+  try {
+    // Check if user already has a personal project
+    const existingProject = await Project.findOne({ 
+      createdBy: userId, 
+      isPersonal: true 
+    });
+
+    if (existingProject) {
+      return existingProject;
+    }
+
+    // Get user info from Firebase Auth
+    let userName = 'My';
+    try {
+      const userRecord = await admin.auth().getUser(userId);
+      if (userRecord) {
+        userName = userRecord.displayName || userRecord.email?.split('@')[0] || 'My';
+      }
+    } catch (error) {
+      console.log(chalk.yellow('\nCould not fetch user details from Firebase, using default name'));
+    }
+
+    // Create new personal project
+    const personalProject = new Project({
+      name: `${userName}'s Personal`,
+      description: 'Your personal project for tasks',
+      userId: userId, // Set the userId field
+      members: [userId],
+      isPersonal: true
+    });
+
+    await personalProject.save();
+    console.log(chalk.green(`\nCreated personal project: ${personalProject.name}`));
+    return personalProject;
+  } catch (error) {
+    console.error(chalk.red('\nError creating personal project:'), error.message);
+    throw error;
+  }
+}
 
 const prompt = inquirer.createPromptModule();
 
@@ -96,7 +161,6 @@ async function getPasswordWithValidation(email) {
 }
 
 let isDbConnected = false;
-let currentWorkspace = null;
 let currentProject = null;
 
 const initializeFirebaseAdmin = () => {
@@ -500,112 +564,81 @@ async function showDashboard(userId) {
       return handleLogout();
     }
     
-    const workspaces = await getWorkspacesByUser(userId);
-    const personalWorkspace = workspaces.find(w => w.isPersonal) || await getOrCreatePersonalWorkspace(userId);
+    // Get projects for the user
+    const projects = await getProjectsByUser(userId);
+    const personalProject = projects.find(p => p.isPersonal) || await createPersonalProject(userId);
     
-    if (personalWorkspace) {
-      currentWorkspace = {
-        _id: personalWorkspace._id,
-        name: personalWorkspace.name,
-        isPersonal: personalWorkspace.isPersonal
-      };
+    // Ensure personal project exists in projects list
+    if (personalProject && !projects.some(p => p && p.isPersonal)) {
+      projects.unshift(personalProject);
     }
     
-    const tasks = currentWorkspace 
-      ? await getTasksByUser(userId, currentWorkspace._id)
-      : [];
+    // Calculate task counts
+    let totalTasks = 0;
+    let completedTasks = 0;
+    let inProgressTasks = 0;
+    let todoTasks = 0;
     
-    console.log(chalk.blue(`\nDashboard - ${user.displayName || user.email}`));
-    console.log(chalk.blue(`\nDashboard - ${user.displayName || user.email}`));
-    console.log(chalk.gray('━'.repeat(50)));
-    
-    if (currentWorkspace) {
-      console.log(`Current Workspace: ${chalk.bold(currentWorkspace.name)}`);
-      
-      const taskCount = tasks.length;
-      const completedTasks = tasks.filter(t => t.status === 'completed').length;
-      const inProgressTasks = tasks.filter(t => t.status === 'in-progress').length;
-      const todoTasks = tasks.filter(t => t.status === 'todo').length;
-      
-      console.log(`\nTask Summary:`);
-      console.log(`  • Total: ${taskCount}`);
-      console.log(`  • ✅ Completed: ${completedTasks}`);
-      console.log(`  • In Progress: ${inProgressTasks}`);
-      console.log(`  • To Do: ${todoTasks}`);
-      
-      const recentTasks = tasks.slice(0, 5);
-      if (recentTasks.length > 0) {
-        console.log(`\nRecent Tasks:`);
-        recentTasks.forEach((task, index) => {
-          const statusIcon = task.status === 'completed' ? '✅' : 
-                           task.status === 'in-progress' ? '[In Progress]' : '[To Do]';
-          const dueDate = task.dueDate ? new Date(task.dueDate).toLocaleDateString() : 'No due date';
-          console.log(`  ${index + 1}. ${statusIcon} ${task.title} (${task.projectId?.name || 'No Project'}) - Due: ${dueDate}`);
-        });
-      }
+    for (const project of projects) {
+      if (!project) continue;
+      const tasks = await getTasksByProject(project._id);
+      totalTasks += tasks.length;
+      completedTasks += tasks.filter(t => t.status === 'completed').length;
+      inProgressTasks += tasks.filter(t => t.status === 'in-progress').length;
+      todoTasks += tasks.filter(t => !t.status || t.status === 'todo').length;
     }
     
-    const menuChoices = [
-      { name: 'View All Tasks', value: 'tasks' },
-      { name: 'Switch Workspace', value: 'workspace' },
+    console.log(chalk.blue(`\nDashboard - ${user.displayName || user.email.split('@')[0]}`));
+    console.log(chalk.gray('━'.repeat(60)));
+    
+    console.log(chalk.bold('Task Summary:'));
+    console.log(`  • Total: ${chalk.bold(totalTasks)}`);
+    console.log(`  • ${chalk.green('✓')} Completed: ${chalk.green(completedTasks)}`);
+    console.log(`  • In Progress: ${chalk.blue(inProgressTasks)}`);
+    console.log(`  • To Do: ${chalk.yellow(todoTasks)}`);
+    
+    const choices = [
+      { name: 'View All Tasks', value: 'all-tasks' },
       { name: 'View Projects', value: 'projects' },
+      createSeparator(),
+      { name: 'Create New Task', value: 'create-task' },
+      { name: 'Create New Project', value: 'create-project' },
+      createSeparator(),
       { name: 'View Profile', value: 'profile' },
-      createSeparator()
+      { name: 'Logout', value: 'logout' }
     ];
-    
-    if (currentWorkspace) {
-      menuChoices.unshift(
-        { name: `Add New Task (${currentWorkspace.name})`, value: 'new-task' },
-        createSeparator()
-      );
-    }
-    
-    menuChoices.push(
-      { name: 'Logout', value: 'logout' },
-      { name: '❌ Exit', value: 'exit' }
-    );
     
     const { action } = await prompt([
       {
         type: 'list',
         name: 'action',
         message: 'What would you like to do?',
-        choices: menuChoices,
-        pageSize: 10
+        choices: choices,
+        pageSize: choices.length
       }
     ]);
     
     switch (action) {
-      case 'logout':
-        await handleLogout();
+      case 'all-tasks':
+        await showAllTasks(userId);
+        break;
+      case 'projects':
+        await showProjectList(userId);
+        break;
+      case 'create-task':
+        console.log(chalk.yellow('\nTask creation coming soon!'));
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        await showDashboard(userId);
+        break;
+      case 'create-project':
+        await createProject(userId);
         break;
       case 'profile':
         await showProfile(user);
         break;
-      case 'tasks':
-        await showAllTasks(userId);
+      case 'logout':
+        await handleLogout();
         break;
-      case 'workspace':
-        await showWorkspaces(userId);
-        break;
-      case 'projects':
-        if (currentWorkspace) {
-          await showProjectList(currentWorkspace._id, userId);
-        } else {
-          await showWorkspaces(userId);
-        }
-        break;
-      case 'new-task':
-        if (currentWorkspace) {
-          // TODO: Implement task creation
-          console.log(chalk.yellow('\nTask creation coming soon!'));
-          await new Promise(resolve => setTimeout(resolve, 1500));
-          await showDashboard(userId);
-        }
-        break;
-      case 'exit':
-        console.log(chalk.green('\nGoodbye!'));
-        process.exit(0);
       default:
         console.log(chalk.yellow('\nThis feature is coming soon!'));
         await new Promise(resolve => setTimeout(resolve, 1500));
@@ -642,9 +675,8 @@ async function showWorkspaces(userId, retryCount = 0) {
     const workspaceChoices = workspaces
       .filter(ws => ws)
       .map(ws => ({
-        name: `${ws.isPersonal ? 'Personal: ' : ''}${ws.name}`,
+        name: ws.isPersonal ? 'Personal' : ws.name,
         value: ws._id.toString(),
-        short: ws.name,
         isPersonal: ws.isPersonal,
         workspace: ws
       }));
@@ -769,14 +801,13 @@ async function showWorkspaceTasks(workspaceId, userId, retryCount = 0) {
     } else if (action === 'home') {
       await showDashboard(userId);
     } else if (action === 'create') {
-      // TODO: Implement task creation
       console.log(chalk.yellow('\nTask creation coming soon!'));
       await new Promise(resolve => setTimeout(resolve, 1500));
       await showWorkspaceTasks(workspaceId, userId);
     }
     
   } catch (error) {
-    console.error(chalk.red(`\n❌ Error: ${error.message}`));
+    console.error(chalk.red(`\nError: ${error.message}`));
     
     if (retryCount < 2) {
       console.log(chalk.yellow(`\nRetrying... (${retryCount + 1}/2)`));
@@ -790,93 +821,114 @@ async function showWorkspaceTasks(workspaceId, userId, retryCount = 0) {
   }
 }
 
-async function showProjectList(workspaceId, userId, retryCount = 0) {
+async function showProjectList(userId) {
   showWelcome();
   
   try {
-    if (retryCount > 2) {
-      throw new Error('Too many failed attempts. Returning to workspace.');
+    const projects = await getProjectsByUser(userId);
+    const personalProject = projects.find(p => p.isPersonal) || await createPersonalProject(userId);
+    
+    // Ensure personal project exists in projects list
+    if (personalProject && !projects.some(p => p && p.isPersonal)) {
+      projects.unshift(personalProject);
     }
     
-    const [workspace, projects] = await Promise.all([
-      Workspace.findById(workspaceId),
-      getProjectsByWorkspace(workspaceId)
-    ]);
-    
-    if (!workspace) {
-      throw new Error('Workspace not found');
-    }
-    
-    const projectChoices = projects
-      .filter(p => p)
-      .map(p => ({
-        name: `${p.isPersonal ? 'Personal: ' : ''}${p.name}`,
-        value: p._id.toString(),
-        short: p.name,
-        isPersonal: p.isPersonal,
-        project: p
-      }));
-    
-    console.log(chalk.blue(`\nProjects in ${workspace.name}`));
+    console.log(chalk.blue('\nYour Projects'));
     console.log(chalk.gray('━'.repeat(40)));
     
-    const { projectId, action } = await prompt([
+    if (projects.length === 0) {
+      console.log(chalk.yellow('\nNo projects found. Create your first project!'));
+    } else {
+      projects.forEach((project, index) => {
+        if (!project) return;
+        console.log(`\n${index + 1}. ${project.name}`);
+        console.log(`   ${chalk.dim(project.description || 'No description')}`);
+      });
+    }
+    
+    const choices = [
+      { name: 'View Project Tasks', value: 'tasks' },
+      { name: 'Create New Project', value: 'create' },
+      createSeparator(),
+      { name: 'Back to Dashboard', value: 'dashboard' }
+    ];
+    
+    const { action } = await prompt([
       {
         type: 'list',
-        name: 'projectId',
-        message: 'Select a project:',
-        choices: [
-          ...projectChoices,
-          createSeparator(),
-          { name: '➕ Create New Project', value: 'create' },
-          { name: 'Back to Workspace', value: 'back' },
-          { name: 'Back to Main Menu', value: 'home' }
-        ],
-        pageSize: 10,
-        loop: false
+        name: 'action',
+        message: '\nWhat would you like to do?',
+        choices: choices,
+        pageSize: 10
       }
     ]);
     
-    if (projectId === 'back') {
-      await showWorkspaceProjects(workspaceId, userId);
-    } else if (projectId === 'home') {
-      await showDashboard(userId);
-    } else if (projectId === 'create') {
-      await createProject(workspaceId, userId);
-      await showProjectList(workspaceId, userId);
-    } else {
-      const selectedProject = projectChoices.find(p => p.value === projectId)?.project;
-      if (selectedProject) {
-        currentProject = {
-          _id: selectedProject._id,
-          name: selectedProject.name,
-          isPersonal: selectedProject.isPersonal
-        };
-      }
+    if (action === 'tasks') {
+      const { projectId } = await prompt([
+        {
+          type: 'list',
+          name: 'projectId',
+          message: 'Select a project to view tasks:',
+          choices: projects
+            .filter(p => p) // Filter out any null/undefined projects
+            .map(p => ({
+              name: p.name,
+              value: p._id.toString()
+            }))
+        }
+      ]);
       
-      await showTasks(projectId, userId);
+      const selectedProject = projects.find(p => p && p._id.toString() === projectId);
+      if (selectedProject) {
+        await showTasks(projectId, userId);
+      } else {
+        console.log(chalk.yellow('\nProject not found.'));
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        await showProjectList(userId);
+      }
+    } else if (action === 'create') {
+      const { name, description } = await prompt([
+        {
+          type: 'input',
+          name: 'name',
+          message: 'Project name:',
+          validate: input => input.trim() ? true : 'Project name is required'
+        },
+        {
+          type: 'input',
+          name: 'description',
+          message: 'Project description (optional):',
+        }
+      ]);
+      
+      const newProject = new Project({
+        name: name.trim(),
+        description: description.trim() || undefined,
+        createdBy: userId,
+        members: [userId],
+        isPersonal: false
+      });
+      
+      await newProject.save();
+      console.log(chalk.green(`\nProject "${newProject.name}" created successfully!`));
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      await showProjectList(userId);
+    } else {
+      await showDashboard(userId);
     }
     
   } catch (error) {
-    console.error(chalk.red(`\n❌ Error: ${error.message}`));
-    
-    if (retryCount < 2) {
-      console.log(chalk.yellow(`\nRetrying... (${retryCount + 1}/2)`));
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      return showProjectList(workspaceId, userId, retryCount + 1);
-    } else {
-      console.log(chalk.yellow('\nReturning to workspace...'));
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      await showWorkspaceProjects(workspaceId, userId);
-    }
+    console.error(chalk.red(`\nError: ${error.message}`));
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    await showDashboard(userId);
   }
 }
 
-async function showWorkspaceProjects(workspaceId, userId, retryCount = 0) {
+async function showWorkspaceProjects(workspaceId, userId, attempt = 0, returnToDashboard = false) {
   showWelcome();
   
   try {
-    if (retryCount > 2) {
+    if (attempt > 2) {
       throw new Error('Too many failed attempts. Returning to workspaces.');
     }
     
@@ -907,7 +959,7 @@ async function showWorkspaceProjects(workspaceId, userId, retryCount = 0) {
     const projectChoices = projects
       .filter(p => p)
       .map(p => ({
-        name: `${p.isPersonal ? 'Personal: ' : ''}${p.name}`,
+        name: p.isPersonal ? 'Personal' : p.name,
         value: p._id.toString(),
         short: p.name,
         isPersonal: p.isPersonal,
@@ -917,19 +969,27 @@ async function showWorkspaceProjects(workspaceId, userId, retryCount = 0) {
     console.log(chalk.blue(`\nWorkspace: ${workspace.name}`));
     console.log(chalk.gray('━'.repeat(40)));
     
+    const choices = [
+      { name: 'View Tasks', value: 'tasks' },
+      { name: 'View Projects', value: 'projects' },
+      createSeparator(),
+      { name: 'Create New Task', value: 'create' },
+      { name: 'Create New Project', value: 'create-project' },
+      createSeparator(),
+      { name: 'Switch Workspace', value: 'back' },
+      { name: 'Back to Main Menu', value: 'home' }
+    ];
+    
+    if (!workspace.isPersonal) {
+      choices.splice(2, 0, { name: 'Manage Members', value: 'members' });
+    }
+    
     const { action } = await prompt([
       {
         type: 'list',
         name: 'action',
         message: 'What would you like to do?',
-        choices: [
-          { name: 'View Tasks', value: 'tasks' },
-          { name: 'View Projects', value: 'projects' },
-          { name: 'Manage Members', value: 'members' },
-          createSeparator(),
-          { name: 'Back to Workspaces', value: 'back' },
-          { name: 'Back to Main Menu', value: 'home' }
-        ]
+        choices: choices
       }
     ]);
     
@@ -986,7 +1046,7 @@ async function showProjects(workspaceId, userId) {
     }
     
     const projectChoices = projects.map(p => ({
-      name: `${p.isPersonal ? 'Personal: ' : ''}${p.name}`,
+      name: p.isPersonal ? 'Personal' : p.name,
       value: p._id.toString(),
       project: p
     }));
@@ -1022,45 +1082,7 @@ async function showProjects(workspaceId, userId) {
   }
 }
 
-async function createWorkspace(userId) {
-  showWelcome();
-  console.log(chalk.cyan('\n=== Create New Workspace ===\n'));
-  
-  try {
-    const { name } = await prompt([
-      {
-        type: 'input',
-        name: 'name',
-        message: 'Workspace name:',
-        validate: input => input.trim() ? true : 'Workspace name cannot be empty'
-      }
-    ]);
-    
-    console.log(chalk.yellow('\nCreating workspace...'));
-    
-    const workspace = new Workspace({
-      userId,
-      name: name.trim(),
-      members: [userId],
-      isPersonal: false
-    });
-    
-    await workspace.save();
-    
-    console.log(chalk.green('\n✅ Workspace created successfully!'));
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    
-    await createProject(workspace._id, userId, true);
-    
-  } catch (error) {
-    console.error(chalk.red('\n❌ Error creating workspace:'));
-    console.error(chalk.red(error.message));
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    await showWorkspaces(userId);
-  }
-}
-
-async function createProject(workspaceId, userId, isFirstProject = false) {
+async function createProject(userId) {
   showWelcome();
   console.log(chalk.cyan('\n=== Create New Project ===\n'));
   
@@ -1084,28 +1106,140 @@ async function createProject(workspaceId, userId, isFirstProject = false) {
     console.log(chalk.yellow('\nCreating project...'));
     
     const project = new Project({
-      workspaceId,
       name: name.trim(),
       description: description.trim(),
-      isPersonal: false
+      isPersonal: false,
+      userId: userId
     });
     
     await project.save();
     
-    console.log(chalk.green('\n✅ Project created successfully!'));
+    console.log(chalk.green('\nProject created successfully!'));
     await new Promise(resolve => setTimeout(resolve, 1000));
     
-    if (isFirstProject) {
-      await showProjects(workspaceId, userId);
+    await showProjectList(userId);
+    
+  } catch (error) {
+    console.error(chalk.red('\nError creating project:'));
+    console.error(chalk.red(error.message));
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    await showProjectList(userId);
+  }
+}
+
+async function showTasks(projectId, userId) {
+  showWelcome();
+  
+  try {
+    const project = await Project.findById(projectId);
+    if (!project) {
+      console.log(chalk.yellow('\nProject not found.'));
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      return showProjectList(userId);
+    }
+    
+    const tasks = await getTasksByProject(projectId, userId);
+    
+    console.log(chalk.blue(`\n${project.name}`));
+    console.log(chalk.gray('━'.repeat(40)));
+    
+    if (tasks.length === 0) {
+      console.log(chalk.yellow('\nNo tasks found in this project.'));
     } else {
-      await showTasks(project._id, userId);
+      tasks.forEach((task, index) => {
+        const status = formatStatus(task.status);
+        const priority = formatPriority(task.priority);
+        const dueDate = task.dueDate ? new Date(task.dueDate).toLocaleDateString() : 'No due date';
+        
+        console.log(`
+${index + 1}. ${task.title}`);
+        console.log(`   ${status} | ${priority} | Due: ${dueDate}`);
+        if (task.description) {
+          console.log(`   ${chalk.dim(task.description.substring(0, 60) + (task.description.length > 60 ? '...' : ''))}`);
+        }
+      });
+    }
+    
+    const choices = [
+      { name: 'Add New Task', value: 'add' },
+      { name: 'View Task Details', value: 'view' },
+      createSeparator(),
+      { name: 'Back to Projects', value: 'back' },
+      { name: 'Back to Dashboard', value: 'dashboard' }
+    ];
+    
+    if (tasks.length > 0) {
+      choices.unshift(
+        { name: 'Edit Task', value: 'edit' },
+        { name: 'Delete Task', value: 'delete' },
+        createSeparator()
+      );
+    }
+    
+    const { action } = await prompt([
+      {
+        type: 'list',
+        name: 'action',
+        message: '\nWhat would you like to do?',
+        choices: choices,
+        pageSize: 10
+      }
+    ]);
+    
+    switch (action) {
+      case 'add':
+        console.log(chalk.yellow('\nTask creation coming soon!'));
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        await showTasks(projectId, userId);
+        break;
+        
+      case 'view':
+        if (tasks.length > 0) {
+          const { taskIndex } = await prompt([
+            {
+              type: 'list',
+              name: 'taskIndex',
+              message: 'Select a task to view:',
+              choices: tasks.map((t, i) => ({
+                name: `${i + 1}. ${t.title} (${formatStatus(t.status)})`,
+                value: i
+              })),
+              pageSize: 10
+            }
+          ]);
+          await showTaskDetails(tasks[taskIndex], project, userId);
+        } else {
+          console.log(chalk.yellow('\nNo tasks to view.'));
+          await new Promise(resolve => setTimeout(resolve, 1500));
+          await showTasks(projectId, userId);
+        }
+        break;
+        
+      case 'edit':
+        console.log(chalk.yellow('\nTask editing coming soon!'));
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        await showTasks(projectId, userId);
+        break;
+        
+      case 'delete':
+        console.log(chalk.yellow('\nTask deletion coming soon!'));
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        await showTasks(projectId, userId);
+        break;
+        
+      case 'back':
+        await showProjectList(userId);
+        break;
+        
+      case 'dashboard':
+      default:
+        await showDashboard(userId);
     }
     
   } catch (error) {
-    console.error(chalk.red('\n❌ Error creating project:'));
-    console.error(chalk.red(error.message));
+    console.error(chalk.red(`\nError: ${error.message}`));
     await new Promise(resolve => setTimeout(resolve, 2000));
-    await showWorkspaces(userId);
+    await showProjectList(userId);
   }
 }
 
@@ -1123,199 +1257,127 @@ async function showAllTasks(userId) {
       return;
     }
     
+    // Group tasks by project
     const tasksByProject = {};
     for (const task of tasks) {
       if (!tasksByProject[task.projectId]) {
         const project = await Project.findById(task.projectId);
-        tasksByProject[task.projectId] = {
-          project,
-          tasks: []
-        };
+        if (project) {
+          tasksByProject[task.projectId] = {
+            project,
+            tasks: []
+          };
+        }
       }
-      tasksByProject[task.projectId].tasks.push(task);
+      if (tasksByProject[task.projectId]) {
+        tasksByProject[task.projectId].tasks.push(task);
+      }
     }
     
-    for (const [projectId, data] of Object.entries(tasksByProject)) {
-      const project = data.project;
-      console.log(chalk.blueBright(`\n${project.name}`));
-      console.log(chalk.gray('-'.repeat(50)));
+    console.log(chalk.blue('Your Tasks by Project:\n'));
+    
+    // Display tasks grouped by project
+    for (const [projectId, { project, tasks }] of Object.entries(tasksByProject)) {
+      if (!project) continue;
       
-      for (const task of data.tasks) {
-        const statusIcon = task.status === 'completed' ? '✅' : 
-                         task.status === 'in-progress' ? '[In Progress]' : '[To Do]';
-        const dueDate = task.dueDate ? 
-          new Date(task.dueDate).toLocaleDateString() : 'No due date';
-          
-        console.log(`  ${statusIcon} ${task.title} (${dueDate})`);
+      console.log(chalk.bold(project.name));
+      console.log(chalk.gray('─'.repeat(40)));
+      
+      if (tasks.length === 0) {
+        console.log(chalk.yellow('  No tasks in this project\n'));
+        continue;
       }
+      
+      tasks.forEach((task, index) => {
+        const status = formatStatus(task.status);
+        const priority = formatPriority(task.priority);
+        const dueDate = task.dueDate ? new Date(task.dueDate).toLocaleDateString() : 'No due date';
+        
+        console.log(`\n  ${index + 1}. ${task.title}`);
+        console.log(`     ${status} | ${priority} | Due: ${dueDate}`);
+        if (task.description) {
+          console.log(`     ${chalk.dim(task.description.substring(0, 60) + (task.description.length > 60 ? '...' : ''))}`);
+        }
+      });
+      
+      console.log('');
     }
     
-    console.log('\n');
     const { action } = await prompt([
       {
         type: 'list',
         name: 'action',
         message: 'What would you like to do?',
         choices: [
-          { name: 'Open a Project', value: 'projects' },
+          { name: 'View a Task', value: 'view' },
+          { name: 'Go to Projects', value: 'projects' },
+          createSeparator(),
           { name: 'Back to Dashboard', value: 'dashboard' }
         ]
       }
     ]);
     
-    if (action === 'projects') {
-      await showWorkspaces(userId);
+    if (action === 'view') {
+      // Flatten all tasks for selection
+      const allTasks = Object.values(tasksByProject).flatMap(({ tasks }) => tasks);
+      
+      const { taskId } = await prompt([
+        {
+          type: 'list',
+          name: 'taskId',
+          message: 'Select a task to view:',
+          choices: allTasks.map(task => {
+            const project = tasksByProject[task.projectId]?.project?.name || 'Unknown Project';
+            return {
+              name: `${task.title} (${project} - ${formatStatus(task.status)})`,
+              value: task._id.toString()
+            };
+          }),
+          pageSize: 10
+        }
+      ]);
+      
+      const selectedTask = allTasks.find(t => t._id.toString() === taskId);
+      if (selectedTask) {
+        const project = tasksByProject[selectedTask.projectId]?.project;
+        await showTaskDetails(selectedTask, project || null, userId);
+      } else {
+        await showAllTasks(userId);
+      }
+    } else if (action === 'projects') {
+      await showProjectList(userId);
     } else {
       await showDashboard(userId);
     }
     
   } catch (error) {
-    console.error(chalk.red('\n❌ Error loading tasks:'));
+    console.error(chalk.red('\nError loading tasks:'));
     console.error(chalk.red(error.message));
-    await showDashboard(userId);
-  }
-}
-
-async function showTasks(projectId, userId) {
-  showWelcome();
-  
-  try {
-    if (!projectId && currentProject) {
-      projectId = currentProject._id;
-    }
-    
-    if (!projectId) {
-      throw new Error('No project selected');
-    }
-    
-    const [project, tasks] = await Promise.all([
-      Project.findById(projectId).populate('workspaceId'),
-      getTasksByProject(projectId, userId)
-    ]);
-    
-    if (!project) {
-      console.log(chalk.red('Project not found.'));
-      await showWorkspaces(userId);
-      return;
-    }
-    
-    currentProject = project;
-    if (project.workspaceId) {
-      currentWorkspace = project.workspaceId;
-    }
-    
-    console.log(chalk.blueBright(`\n${project.name}`));
-    if (project.description) {
-      console.log(chalk.gray(project.description));
-    }
-    console.log(chalk.gray('─'.repeat(50)));
-    
-    if (tasks.length === 0) {
-      console.log(chalk.yellow('\nNo tasks in this project yet.'));
-    } else {
-      const tasksByStatus = {
-        'todo': [],
-        'in-progress': [],
-        'completed': []
-      };
-      
-      tasks.forEach(task => {
-        if (task.status in tasksByStatus) {
-          tasksByStatus[task.status].push(task);
-        } else {
-          tasksByStatus[task.status] = [task];
-        }
-      });
-      
-      for (const [status, statusTasks] of Object.entries(tasksByStatus)) {
-        if (statusTasks.length > 0) {
-          const statusLabel = status === 'todo' ? 'To Do' : 
-                           status === 'in-progress' ? 'In Progress' : 'Completed';
-          console.log(`\n${chalk.bold(statusLabel)}`);
-          
-          statusTasks.forEach((task, index) => {
-            const dueDate = task.dueDate ? 
-              new Date(task.dueDate).toLocaleDateString() : 'No due date';
-            const priorityIcon = 
-              task.priority === 'high' ? '[High]' : 
-              task.priority === 'medium' ? '[Medium]' : '[Low]';
-              
-            console.log(`  ${index + 1}. ${priorityIcon} ${task.title} (${dueDate})`);
-          });
-        }
-      }
-    }
-    
-    const menuChoices = [
-      { name: '➕ Create New Task', value: 'create' },
-      createSeparator()
-    ];
-    
-    if (tasks.length > 0) {
-      menuChoices.push(
-        { name: 'View Task Details', value: 'view' },
-        { name: '✏️  Edit Task', value: 'edit' },
-        createSeparator()
-      );
-    }
-    
-    menuChoices.push(
-      { name: 'Back to Project List', value: 'projects' },
-      { name: 'Back to Dashboard', value: 'dashboard' }
-    );
     
     const { action } = await prompt([
       {
         type: 'list',
         name: 'action',
         message: 'What would you like to do?',
-        choices: menuChoices,
-        pageSize: 10
+        choices: [
+          { name: 'Back to Dashboard', value: 'dashboard' },
+          { name: 'Try Again', value: 'retry' }
+        ]
       }
     ]);
     
-    switch (action) {
-      case 'create':
-        // TODO: Implement task creation
-        console.log(chalk.yellow('\nTask creation coming soon!'));
-        await new Promise(resolve => setTimeout(resolve, 1500));
-        return showTasks(projectId, userId);
-        
-      case 'view':
-        // TODO: Implement task selection and details view
-        console.log(chalk.yellow('\nTask details view coming soon!'));
-        await new Promise(resolve => setTimeout(resolve, 1500));
-        return showTasks(projectId, userId);
-        
-      case 'edit':
-        // TODO: Implement task editing
-        console.log(chalk.yellow('\nTask editing coming soon!'));
-        await new Promise(resolve => setTimeout(resolve, 1500));
-        return showTasks(projectId, userId);
-        
-      case 'projects':
-        if (currentWorkspace) {
-          return showProjectList(currentWorkspace._id, userId);
-        } else {
-          return showWorkspaces(userId);
-        }
-        
-      case 'dashboard':
-      default:
-        return showDashboard(userId);
+    if (action === 'dashboard') {
+      return showDashboard(userId);
+    } else {
+      return showAllTasks(userId);
     }
-    
-  } catch (error) {
-    console.error(chalk.red('\n❌ Error loading tasks:'));
-    console.error(chalk.red(error.message));
-    await showDashboard(userId);
   }
 }
 
 async function showTaskDetails(task, project, userId) {
   if (!task) {
     console.log(chalk.red('Task not found.'));
-    await showWorkspaces(userId);
+    await showDashboard(userId);
     return;
   }
   
@@ -1415,9 +1477,9 @@ async function showTaskDetails(task, project, userId) {
       case 'back':
       default:
         if (project) {
-          await showTasks(project._id, userId);
+          await showAllTasks(userId);
         } else {
-          await showWorkspaces(userId);
+          await showDashboard(userId);
         }
     }
   } catch (error) {

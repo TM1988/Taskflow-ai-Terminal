@@ -38,7 +38,15 @@ const workspaceSchema = new mongoose.Schema({
 });
 
 const projectSchema = new mongoose.Schema({
-  workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', required: true },
+  workspaceId: { 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: 'Workspace',
+    required: false // Made optional since we're removing workspace functionality
+  },
+  userId: { 
+    type: String, 
+    required: true // Added to track project ownership
+  },
   name: { type: String, required: true },
   description: { type: String },
   color: { type: String, default: '#3b82f6' },
