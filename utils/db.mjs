@@ -1,4 +1,85 @@
 import mongoose from 'mongoose';
+import { MongoClient } from 'mongodb';
+import admin from 'firebase-admin';
+
+// Helper function to get the Firebase Admin config
+function getFirebaseAdminConfig() {
+  // Get the private key from environment variable
+  const privateKey = process.env.FIREBASE_ADMIN_PRIVATE_KEY;
+  const projectId = process.env.FIREBASE_ADMIN_PROJECT_ID;
+  const clientEmail = process.env.FIREBASE_ADMIN_CLIENT_EMAIL;
+  
+  if (!privateKey || !projectId || !clientEmail) {
+    const missing = [];
+    if (!privateKey) missing.push('FIREBASE_ADMIN_PRIVATE_KEY');
+    if (!projectId) missing.push('FIREBASE_ADMIN_PROJECT_ID');
+    if (!clientEmail) missing.push('FIREBASE_ADMIN_CLIENT_EMAIL');
+    
+    throw new Error(`Missing required Firebase Admin config: ${missing.join(', ')}`);
+  }
+  
+  try {
+    // Handle the private key format
+    let cleanPrivateKey = privateKey
+      // Remove surrounding quotes if present
+      .replace(/^"|"$/g, '')
+      // Convert escaped newlines to actual newlines
+      .replace(/\\n/g, '\n');
+    
+    return {
+      credential: admin.credential.cert({
+        projectId,
+        clientEmail,
+        privateKey: cleanPrivateKey
+      }),
+      databaseURL: `https://${projectId}.firebaseio.com`
+    };
+  } catch (error) {
+    console.error('❌ Error processing Firebase Admin config:', error.message);
+    throw error;
+  }
+}
+
+// Initialize Firebase Admin if not already initialized
+if (!admin.apps.length) {
+  try {
+    if (!process.env.FIREBASE_ADMIN_PROJECT_ID || 
+        !process.env.FIREBASE_ADMIN_CLIENT_EMAIL || 
+        !process.env.FIREBASE_ADMIN_PRIVATE_KEY) {
+      throw new Error('Missing required Firebase Admin environment variables');
+    }
+
+    const serviceAccount = {
+      type: 'service_account',
+      project_id: process.env.FIREBASE_ADMIN_PROJECT_ID,
+      private_key_id: 'auto-generated',
+      private_key: process.env.FIREBASE_ADMIN_PRIVATE_KEY.replace(/\\\\n/g, '\n'),
+      client_email: process.env.FIREBASE_ADMIN_CLIENT_EMAIL,
+      client_id: 'auto-generated',
+      auth_uri: 'https://accounts.google.com/o/oauth2/auth',
+      token_uri: 'https://oauth2.googleapis.com/token',
+      auth_provider_x509_cert_url: 'https://www.googleapis.com/oauth2/v1/certs',
+      client_x509_cert_url: `https://www.googleapis.com/robot/v1/metadata/x509/${encodeURIComponent(process.env.FIREBASE_ADMIN_CLIENT_EMAIL)}`,
+      universe_domain: 'googleapis.com'
+    };
+
+    const firebaseConfig = {
+      credential: admin.credential.cert(serviceAccount),
+      databaseURL: `https://${process.env.FIREBASE_ADMIN_PROJECT_ID}.firebaseio.com`,
+      projectId: process.env.FIREBASE_ADMIN_PROJECT_ID
+    };
+    
+    admin.initializeApp(firebaseConfig);
+    console.log('✅ Firebase Admin initialized successfully');
+  } catch (error) {
+    console.error('❌ Failed to initialize Firebase Admin:');
+    console.error(error.message);
+    if (error.stack) {
+      console.error(error.stack);
+    }
+    throw error;
+  }
+}
 
 const connectDB = async (options = { verbose: false }) => {
   try {
@@ -283,5 +364,65 @@ export {
   User,
   Workspace,
   Project,
-  Task
+  Task,
+  getUserDatabaseConnection
 };
+
+/**
+ * Gets a database connection for a specific user
+ * @param {string} userId - The user's Firebase UID
+ * @returns {Promise<import('mongodb').Db>} MongoDB database instance
+ */
+async function getUserDatabaseConnection(userId) {
+  if (!userId) {
+    throw new Error('User ID is required');
+  }
+
+  try {
+    // Try to get the user's database name from Firebase, but don't fail if permissions are missing
+    let userVerified = false;
+    try {
+      const userRecord = await admin.auth().getUser(userId);
+      if (userRecord) {
+        userVerified = true;
+      }
+    } catch (firebaseError) {
+      // If Firebase verification fails due to permissions, continue silently
+      if (firebaseError.message.includes('permission') || firebaseError.message.includes('PERMISSION_DENIED')) {
+        // Continue silently - no need to warn users about permission issues
+        userVerified = false;
+      } else {
+        // Only show warnings for unexpected Firebase errors
+        console.warn('⚠️  Firebase user verification failed:', firebaseError.message);
+        userVerified = false;
+      }
+    }
+
+    // Use the main database name from MONGODB_URI
+    const mongoUri = process.env.MONGODB_URI;
+    if (!mongoUri) {
+      throw new Error('MongoDB connection string not configured');
+    }
+
+    // Create a new connection to the database
+    const client = new MongoClient(mongoUri, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+      connectTimeoutMS: 30000, // Match the timeout from your MONGODB_URI
+      socketTimeoutMS: 60000,
+      serverSelectionTimeoutMS: 30000,
+      heartbeatFrequencyMS: 10000
+    });
+
+    await client.connect();
+    const db = client.db('myVercelAppDB'); // Use exact database name from MongoDB Compass (capital letters)
+    
+    // Test the connection
+    await db.command({ ping: 1 });
+    
+    return db;
+  } catch (error) {
+    console.error('❌ Error connecting to database:', error.message);
+    throw new Error(`Failed to connect to database: ${error.message}`);
+  }
+}

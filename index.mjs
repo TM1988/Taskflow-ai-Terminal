@@ -28,7 +28,8 @@ import {
   Workspace,
   Project,
   Task,
-  User 
+  User,
+  getUserDatabaseConnection as _getUserDatabaseConnection
 } from './utils/db.mjs';
 
 /**
@@ -57,43 +58,87 @@ async function getProjectsByUser(userId) {
  */
 async function createPersonalProject(userId) {
   try {
-    // Check if user already has a personal project
     const existingProject = await Project.findOne({ 
-      createdBy: userId, 
+      userId: userId, 
       isPersonal: true 
     });
-
     if (existingProject) {
       return existingProject;
     }
-
-    // Get user info from Firebase Auth
-    let userName = 'My';
+    
+    // Get user details from Firebase
+    let userName = 'Your';
+    let userEmail = '';
+    
     try {
       const userRecord = await admin.auth().getUser(userId);
       if (userRecord) {
-        userName = userRecord.displayName || userRecord.email?.split('@')[0] || 'My';
+        // Try to get a nice display name
+        if (userRecord.displayName) {
+          // If display name exists, use it
+          userName = userRecord.displayName;
+          // Handle cases where display name might be in 'First Last' format
+          if (userName.includes(' ')) {
+            const names = userName.split(' ');
+            userName = names[0]; // Use just the first name
+          }
+        } else if (userRecord.email) {
+          // If no display name, use the part before @ in email
+          userEmail = userRecord.email;
+          const emailName = userEmail.split('@')[0];
+          // Clean up the name from email (remove numbers, special chars)
+          const cleanName = emailName.replace(/[^a-zA-Z]/g, ' ').trim();
+          if (cleanName) {
+            userName = cleanName.split(' ')[0]; // Take first part if multiple words
+          }
+        }
       }
     } catch (error) {
       console.log(chalk.yellow('\nCould not fetch user details from Firebase, using default name'));
     }
-
-    // Create new personal project
+    
+    // Format the project name nicely
+    const projectName = `${userName}${userName.endsWith('s') ? "'" : "'s"} Tasks`;
+    
     const personalProject = new Project({
-      name: `${userName}'s Personal`,
+      name: projectName,
       description: 'Your personal project for tasks',
-      userId: userId, // Set the userId field
+      userId: userId,
       members: [userId],
       isPersonal: true
     });
-
+    
     await personalProject.save();
-    console.log(chalk.green(`\nCreated personal project: ${personalProject.name}`));
+    console.log(chalk.green(`\nWelcome, ${userName}! Your personal task board is ready.`));
     return personalProject;
   } catch (error) {
     console.error(chalk.red('\nError creating personal project:'), error.message);
     throw error;
   }
+}
+
+function checkPasswordRequirements(input) {
+  const hasLowercase = /[a-z]/.test(input);
+  const hasUppercase = /[A-Z]/.test(input);
+  const hasNumber = /[0-9]/.test(input);
+  const hasSpecial = /[!@#$%^&*(),.?":{}|<>]/.test(input);
+  const lengthOk = input.length >= 6 && input.length <= 12;
+  
+  return {
+    hasLowercase,
+    hasUppercase,
+    hasNumber,
+    hasSpecial,
+    lengthOk,
+    isValid: hasLowercase && hasUppercase && hasNumber && hasSpecial && lengthOk,
+    message: [
+      lengthOk ? '✓ 6-12 characters' : '✗ Must be 6-12 characters',
+      hasLowercase ? '✓ Lowercase letter' : '✗ Needs a lowercase letter',
+      hasUppercase ? '✓ Uppercase letter' : '✗ Needs an uppercase letter',
+      hasNumber ? '✓ Number' : '✗ Needs a number',
+      hasSpecial ? '✓ Special character' : '✗ Needs a special character (!@#$%^&*)',
+    ].join('\n')
+  };
 }
 
 const prompt = inquirer.createPromptModule();
@@ -165,6 +210,9 @@ async function getPasswordWithValidation(email) {
 let isDbConnected = false;
 let currentProject = null;
 
+// Initialize Firebase Admin and Firestore
+let firestoreDb = null;
+
 const initializeFirebaseAdmin = () => {
   try {
     if (admin.apps.length === 0) {
@@ -182,12 +230,20 @@ const initializeFirebaseAdmin = () => {
         admin.initializeApp({
           credential: admin.credential.cert(serviceAccount)
         });
+        
+        // Initialize Firestore
+        firestoreDb = admin.firestore();
         return true;
       } catch (initError) {
         console.error(chalk.red('❌ Error initializing Firebase Admin:'));
         console.error(initError);
         throw initError;
       }
+    }
+    
+    // If Firebase is already initialized, ensure Firestore is initialized
+    if (!firestoreDb) {
+      firestoreDb = admin.firestore();
     }
     return true;
   } catch (error) {
@@ -209,6 +265,12 @@ const initializeFirebaseAdmin = () => {
     }
     
     initializeFirebaseAdmin();
+    
+    // Wait a moment to ensure Firebase is fully initialized
+    await new Promise(resolve => setTimeout(resolve, 100));
+    
+    // Now start the app
+    await init();
   } catch (error) {
     console.error(chalk.red('Error during initialization:'), error.message);
     process.exit(1);
@@ -232,7 +294,7 @@ function getDeviceId() {
 }
 
 const SESSION_DIR = `${os.homedir()}/.taskflow-cli`;
-const SESSION_FILE = `${SESSION_DIR}/session-${getDeviceId()}.json`;
+const SESSION_FILE = `${SESSION_DIR}/session.json`;
 
 async function ensureSessionDir() {
   try {
@@ -249,25 +311,33 @@ async function ensureSessionDir() {
 
 async function saveSession(user) {
   try {
+    if (!user || !user.uid || !user.email) {
+      throw new Error('Invalid user data provided to saveSession');
+    }
+    
     await ensureSessionDir();
     
     const session = {
       uid: user.uid,
-      email: user.email.toLowerCase(), // Store email in lowercase for consistency
-      displayName: user.displayName,
+      email: user.email.toLowerCase(),
+      displayName: user.displayName || user.email.split('@')[0],
       deviceId: getDeviceId(),
-      lastLogin: new Date().toISOString(),
-      // Don't store the token in the session file
-      // Instead, we'll verify the session with Firebase on each load
+      lastLogin: new Date().toISOString()
     };
     
-    // Encrypt sensitive data before saving
-    const encryptedSession = JSON.stringify(session);
-    await fs.writeFile(SESSION_FILE, encryptedSession, { mode: 0o600 }); // Read/write for user only
+    // Ensure we're only saving plain objects, not Firestore objects
+    const cleanSession = JSON.parse(JSON.stringify(session));
+    
+    await fs.writeFile(SESSION_FILE, JSON.stringify(cleanSession, null, 2), 'utf8');
+    
+    // Set secure permissions (read/write for user only)
+    if (process.platform !== 'win32') {
+      await fs.chmod(SESSION_FILE, 0o600);
+    }
     
     return true;
   } catch (error) {
-    console.error('Error saving session:', error);
+    console.error(chalk.red('❌ Error saving session:'), error);
     return false;
   }
 }
@@ -288,7 +358,8 @@ async function loadSession() {
     const session = JSON.parse(sessionData);
     
     // Verify the session is from this device
-    if (session.deviceId !== getDeviceId()) {
+    const currentDeviceId = getDeviceId();
+    if (session.deviceId !== currentDeviceId) {
       console.log(chalk.yellow('Session is not from this device. Please log in again.'));
       await clearSession();
       return null;
@@ -305,15 +376,30 @@ async function loadSession() {
         };
       }
     } catch (error) {
-      console.error('Error verifying session with Firebase:', error);
+      // If it's a permission error, we'll allow the session to continue
+      // but warn the user about limited Firebase features
+      if (error.message.includes('permission') || error.message.includes('PERMISSION_DENIED')) {
+        console.log(chalk.yellow('⚠️  Firebase verification unavailable due to permissions, continuing with cached session'));
+        
+        return {
+          ...session,
+          emailVerified: false,
+          firebaseVerified: false
+        };
+      }
+      
+      // For other errors, still fail
+      console.log(chalk.yellow('Session verification failed, clearing...'));
+      await clearSession();
+      return null;
     }
     
-    // If we get here, the session is invalid
+    // If we get here, the session is invalid (no return from Firebase verification)
     await clearSession();
     return null;
     
   } catch (error) {
-    console.error('Error loading session:', error);
+    console.error(chalk.red('Error loading session:'), error.message);
     await clearSession();
     return null;
   }
@@ -349,14 +435,21 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, updateProfile } from 'firebase/auth';
 
 const firebaseConfig = {
-  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
-  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
-  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
-  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
-  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
-  measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID
+  apiKey: process.env.FIREBASE_API_KEY,
+  authDomain: process.env.FIREBASE_AUTH_DOMAIN,
+  projectId: process.env.FIREBASE_PROJECT_ID,
+  storageBucket: process.env.FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID,
+  appId: process.env.FIREBASE_APP_ID,
+  measurementId: process.env.FIREBASE_MEASUREMENT_ID
 };
+
+// Log Firebase config for debugging (without sensitive data)
+console.log('Firebase Config:', {
+  ...firebaseConfig,
+  apiKey: firebaseConfig.apiKey ? '***' + firebaseConfig.apiKey.slice(-4) : 'Not set',
+  appId: firebaseConfig.appId ? '***' + firebaseConfig.appId.slice(-4) : 'Not set'
+});
 
 const firebaseApp = initializeApp(firebaseConfig);
 const auth = getAuth(firebaseApp);
@@ -420,11 +513,12 @@ async function showMainMenu() {
 }
 
 async function handleRegister(previousValues = {}) {
-  showWelcome();
-  console.log(chalk.cyan('\n=== Create a New Account ===\n'));
+  try {
+    showWelcome();
+    console.log(chalk.cyan('\n=== Create a New Account ===\n'));
 
-  const emailPrompt = await prompt([
-    {
+    // Get email
+    const emailPrompt = await prompt([{
       type: 'input',
       name: 'email',
       message: 'Enter your email:',
@@ -433,118 +527,171 @@ async function handleRegister(previousValues = {}) {
         if (/^\S+@\S+\.\S+$/.test(input)) return true;
         return 'Please enter a valid email address';
       },
-    },
-  ]);
-  const email = emailPrompt.email;
-
-  const checkPasswordRequirements = (input) => {
-    const hasLowercase = /[a-z]/.test(input);
-    const hasUppercase = /[A-Z]/.test(input);
-    const hasNumber = /[0-9]/.test(input);
-    const hasSpecial = /[!@#$%^&*(),.?":{}|<>]/.test(input);
-    const lengthOk = input.length >= 6 && input.length <= 12;
-    
-    return {
-      hasLowercase,
-      hasUppercase,
-      hasNumber,
-      hasSpecial,
-      lengthOk,
-      isValid: hasLowercase && hasUppercase && hasNumber && hasSpecial && lengthOk
-    };
-  };
-
-  const password = await getPasswordWithValidation(email);
-  
-  console.clear();
-  console.log(chalk.cyan('=== Create a New Account ===\n'));
-  console.log(`Email: ${email}\n`);
-  console.log('Password: •'.repeat(8) + '\n');
-  
-  const displayNamePrompt = await prompt([
-    {
-      type: 'input',
-      name: 'displayName',
-      message: 'Enter your full name:',
-      default: previousValues.displayName || '',
-      validate: (input) => {
-        if (input.trim().length > 0) return true;
-        return 'Please enter your name';
-      },
-    },
-  ]);
-  const displayName = displayNamePrompt.displayName;
-
-  if (Object.keys(previousValues).length > 0) {
-    const { usePrevious } = await prompt([{
-      type: 'confirm',
-      name: 'usePrevious',
-      message: 'Use previously entered values?',
-      default: true
     }]);
+    const { email } = emailPrompt;
+
+    // Get password with validation
+    const { password } = await prompt({
+      type: 'password',
+      name: 'password',
+      message: 'Create a password (6-12 chars, mixed case, numbers, special chars):',
+      mask: '*',
+      validate: (input) => {
+        const requirements = checkPasswordRequirements(input);
+        if (requirements.isValid) return true;
+        return 'Please ensure your password meets all requirements';
+      }
+    });
     
-    if (!usePrevious) {
-      return handleRegister();
-    }
-  }
-  
-  const answers = { email, password, displayName };
-  
-  try {
-    const userCredential = await createUserWithEmailAndPassword(auth, answers.email, answers.password);
-    const user = userCredential.user;
-    
-    await updateProfile(user, {
-      displayName: answers.displayName
+    // Get password confirmation
+    await prompt({
+      type: 'password',
+      name: 'confirmPassword',
+      message: 'Confirm your password:',
+      mask: '*',
+      validate: (input) => {
+        if (input === password) return true;
+        return 'Passwords do not match';
+      }
     });
 
-    if (isDbConnected) {
+    // Get user's name
+    const namePrompt = await prompt([{
+      type: 'input',
+      name: 'name',
+      message: 'Enter your full name:',
+      default: previousValues.name || '',
+      validate: (input) => {
+        if (input.trim().length < 2) return 'Please enter your full name';
+        return true;
+      }
+    }]);
+    const { name } = namePrompt;
+
+    console.clear();
+    console.log(chalk.cyan('=== Create a New Account ===\n'));
+    console.log(`Email: ${email}\n`);
+    
+    console.log(chalk.blue('Creating your account...'));
+    const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+    const user = userCredential.user;
+    
+    // Update user profile with display name
+    await updateProfile(user, { displayName: name });
+    
+    // Create user document in Firestore
+    await firestoreDb.collection('users').doc(user.uid).set({
+      email: user.email,
+      displayName: name,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    
+    console.log(chalk.green('\n✅ Account created successfully!'));
+    console.log(chalk.blue('\nLogging you in...'));
+    
+    // Create a personal project for the user
+    await createPersonalProject(user.uid);
+    
+    try {
+      // Ensure user is properly created in Firestore
+      await ensureUserInFirestore({
+        uid: user.uid,
+        email: user.email,
+        displayName: name
+      });
+      
+      // Also save user to MongoDB
       await saveUser({
         uid: user.uid,
         email: user.email,
-        displayName: answers.displayName,
+        displayName: name
       });
+      
+      // Get the user document data
+      const userDoc = await firestoreDb.collection('users').doc(user.uid).get();
+      const userData = userDoc.data() || {};
+      
+      // Create session data
+      const sessionData = {
+        uid: user.uid,
+        email: user.email,
+        displayName: userData.displayName || name || user.email.split('@')[0]
+      };
+      
+      // Save session
+      await saveSession(sessionData);
+      
+      console.log(chalk.green('\n✅ Registration successful! Logging you in...'));
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      // Show dashboard with explicit user ID
+      await showDashboard(user.uid);
+    } catch (dbError) {
+      console.error(chalk.red('\nError creating user profile:'), dbError);
+      throw new Error('Failed to complete user registration. Please try again.');
     }
-
-    console.log(chalk.green('\n✅ Account created successfully!'));
-    console.log(chalk.blue(`\nWelcome to Taskflow AI, ${answers.displayName}!`));
-    
-    await showDashboard(user.uid);
   } catch (error) {
-    console.error(chalk.red('\n❌ Error creating account:'));
+    console.error(chalk.red('\nError creating account:'));
     console.error(chalk.red(error.message));
     
     if (error.code === 'auth/email-already-in-use') {
-      console.log(chalk.yellow('\nThis email is already registered. Would you like to log in instead?'));
-      const { loginInstead } = await prompt([{
-        type: 'confirm',
-        name: 'loginInstead',
-        message: 'Log in instead?',
-        default: true
-      }]);
+      console.log(chalk.yellow('\nThis email is already registered. Please try logging in instead.'));
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      await handleLogin({ email: previousValues.email });
+    } else {
+      console.log(chalk.yellow('\nPlease try again.'));
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      await handleRegister(previousValues);
+    }
+  }
+}
+
+async function ensureUserInFirestore(user) {
+  try {
+    const userDoc = await firestoreDb.collection('users').doc(user.uid).get();
+    
+    if (!userDoc.exists) {
+      console.log(chalk.blue('\nCreating your user profile...'));
       
-      if (loginInstead) {
-        return handleLogin({ email });
+      // Create user document in Firestore
+      await firestoreDb.collection('users').doc(user.uid).set({
+        email: user.email,
+        displayName: user.displayName || user.email.split('@')[0],
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      
+      // Also save to MongoDB
+      await saveUser({
+        uid: user.uid,
+        email: user.email,
+        displayName: user.displayName || user.email.split('@')[0]
+      });
+      
+      // Create a personal project for the user
+      await createPersonalProject(user.uid);
+    } else {
+      // User exists in Firestore, ensure they exist in MongoDB too
+      try {
+        const mongoUser = await getUserById(user.uid);
+        if (!mongoUser) {
+          console.log(chalk.blue('\nSyncing user profile to MongoDB...'));
+          await saveUser({
+            uid: user.uid,
+            email: user.email,
+            displayName: user.displayName || user.email.split('@')[0]
+          });
+        }
+      } catch (mongoError) {
+        console.warn(chalk.yellow('\nWarning: Could not sync user to MongoDB:'), mongoError.message);
       }
     }
     
-    const { action } = await prompt([
-      {
-        type: 'list',
-        name: 'action',
-        message: 'What would you like to do?',
-        choices: [
-          { name: 'Try again', value: 'retry' },
-          createSeparator(),
-          { name: 'Back to main menu', value: 'back' },
-        ],
-        pageSize: 3,
-      },
-    ]);
-
-    if (action === 'retry') {
-      await handleRegister(values);
-    }
+    return true;
+  } catch (error) {
+    console.error(chalk.red('Error ensuring user in Firestore:'), error);
+    throw error;
   }
 }
 
@@ -554,6 +701,13 @@ async function handleLogin(previousValues = {}) {
   try {
     const session = await loadSession();
     if (session) {
+      // Ensure the user exists in Firestore
+      await ensureUserInFirestore({
+        uid: session.uid,
+        email: session.email,
+        displayName: session.displayName
+      });
+      
       console.log(chalk.green(`\nWelcome back, ${session.displayName || session.email}!`));
       await new Promise(resolve => setTimeout(resolve, 1000));
       await showDashboard(session.uid);
@@ -590,9 +744,27 @@ async function handleLogin(previousValues = {}) {
     const userCredential = await signInWithEmailAndPassword(auth, email, password);
     const user = userCredential.user;
     
+    // Ensure user exists in Firestore
+    await ensureUserInFirestore(user);
+    
     console.log(chalk.green(`\n✅ Successfully logged in as ${user.email}`));
     
-    await saveSession(user);
+    // Save session with updated user data
+    const userDoc = await firestoreDb.collection('users').doc(user.uid).get();
+    const userData = userDoc.data() || {};
+    
+    // Also ensure user exists in MongoDB
+    await saveUser({
+      uid: user.uid,
+      email: user.email,
+      displayName: userData.displayName || user.displayName || user.email.split('@')[0]
+    });
+    
+    await saveSession({
+      uid: user.uid,
+      email: user.email,
+      displayName: userData.displayName || user.displayName || user.email.split('@')[0]
+    });
     
     await new Promise(resolve => setTimeout(resolve, 1000));
     await showDashboard(user.uid);
@@ -652,19 +824,22 @@ async function showDashboard(userId) {
       projects.unshift(personalProject);
     }
     
-    // Calculate task counts
+    // Calculate task counts using the same method as the web app
     let totalTasks = 0;
     let completedTasks = 0;
     let inProgressTasks = 0;
     let todoTasks = 0;
     
-    for (const project of projects) {
-      if (!project) continue;
-      const tasks = await getTasksByProject(project._id);
-      totalTasks += tasks.length;
-      completedTasks += tasks.filter(t => t.status === 'completed').length;
-      inProgressTasks += tasks.filter(t => t.status === 'in-progress').length;
-      todoTasks += tasks.filter(t => !t.status || t.status === 'todo').length;
+    try {
+      // Use the same fetchWebAppTasks function as the task listing
+      const tasks = await fetchWebAppTasks(userId);
+      totalTasks = tasks.length;
+      completedTasks = tasks.filter(t => t.status === 'completed').length;
+      inProgressTasks = tasks.filter(t => t.status === 'in-progress').length;
+      todoTasks = tasks.filter(t => !t.status || t.status === 'todo').length;
+    } catch (error) {
+      console.warn(chalk.yellow('⚠️  Could not load task counts:', error.message));
+      // Keep zeros as fallback
     }
     
     console.log(chalk.blue(`\nDashboard - ${user.displayName || user.email.split('@')[0]}`));
@@ -677,14 +852,13 @@ async function showDashboard(userId) {
     console.log(`  • To Do: ${chalk.yellow(todoTasks)}`);
     
     const choices = [
-      { name: 'View All Tasks', value: 'all-tasks' },
-      { name: 'View Projects', value: 'projects' },
+      { name: '📋 View All Tasks', value: 'all-tasks' },
       createSeparator(),
-      { name: 'Create New Task', value: 'create-task' },
-      { name: 'Create New Project', value: 'create-project' },
+      { name: '➕ Create New Task', value: 'create-task' },
       createSeparator(),
-      { name: 'View Profile', value: 'profile' },
-      { name: 'Logout', value: 'logout' }
+      { name: '👤 View Profile', value: 'profile' },
+      { name: '🚪 Logout', value: 'logout' },
+      { name: '❌ Exit', value: 'exit' }
     ];
     
     const { action } = await prompt([
@@ -701,16 +875,8 @@ async function showDashboard(userId) {
       case 'all-tasks':
         await showAllTasks(userId);
         break;
-      case 'projects':
-        await showProjectList(userId);
-        break;
       case 'create-task':
-        console.log(chalk.yellow('\nTask creation coming soon!'));
-        await new Promise(resolve => setTimeout(resolve, 1500));
-        await showDashboard(userId);
-        break;
-      case 'create-project':
-        await createProject(userId);
+        await createTask(userId);
         break;
       case 'profile':
         await showProfile(user);
@@ -718,9 +884,11 @@ async function showDashboard(userId) {
       case 'logout':
         await handleLogout();
         break;
+      case 'exit':
+        console.log(chalk.blue('\nGoodbye! 👋'));
+        process.exit(0);
+        break;
       default:
-        console.log(chalk.yellow('\nThis feature is coming soon!'));
-        await new Promise(resolve => setTimeout(resolve, 1500));
         await showDashboard(userId);
     }
   } catch (error) {
@@ -1323,37 +1491,53 @@ ${index + 1}. ${task.title}`);
 }
 
 /**
- * Fetches tasks from the web app's personal board
+ * Fetches tasks from the web app's personal board using the same method as the web version
  * @param {string} userId - The user's Firebase UID
  * @returns {Promise<Array>} Array of tasks
  */
 async function fetchWebAppTasks(userId) {
   try {
-    // Get user's personal project
-    const personalProject = await Project.findOne({ 
-      userId,
-      isPersonal: true 
-    });
-
-    if (!personalProject) {
-      console.log(chalk.yellow('\nNo personal project found. Creating one...'));
-      await createPersonalProject(userId);
-      return [];
+    // Use the same database connection method as the web version
+    const database = await _getUserDatabaseConnection(userId);
+    if (!database) {
+      throw new Error('Failed to get user database connection');
     }
-
-    // Get all tasks from the personal project
-    const tasks = await Task.find({ 
-      projectId: personalProject._id,
-      userId
-    }).sort({ 
-      dueDate: 1, // Sort by due date (oldest first)
-      priority: -1, // Then by priority (high to low)
-      createdAt: 1 // Then by creation date
-    });
-
-    return tasks;
+    
+    // Query personalTasks collection exactly like the web version does
+    const personalTasks = await database
+      .collection('personalTasks')
+      .find({ userId })
+      .sort({ updatedAt: -1, order: 1 })
+      .toArray();
+    
+    if (personalTasks && personalTasks.length > 0) {
+      // Transform to match the expected format (same as web version)
+      return personalTasks.map(task => ({
+        id: task._id.toString(),
+        title: task.title || 'Untitled Task',
+        description: task.description || '',
+        projectId: 'personal', // Web app uses 'personal' for personal tasks
+        columnId: task.columnId || 'todo',
+        status: task.status || 'todo',
+        priority: task.priority || 'medium',
+        order: task.order || 0,
+        isBlocked: task.isBlocked || false,
+        tags: task.tags || [],
+        assigneeId: task.assigneeId || userId,
+        assigneeName: task.assigneeName || 'You',
+        dueDate: task.dueDate ? (task.dueDate instanceof Date ? task.dueDate : new Date(task.dueDate)) : null,
+        completedAt: task.completedAt ? (task.completedAt instanceof Date ? task.completedAt : new Date(task.completedAt)) : null,
+        createdAt: task.createdAt ? (task.createdAt instanceof Date ? task.createdAt : new Date(task.createdAt)) : new Date(),
+        updatedAt: task.updatedAt ? (task.updatedAt instanceof Date ? task.updatedAt : new Date(task.updatedAt)) : new Date(),
+        userId: task.userId || userId,
+        _id: task._id.toString()
+      }));
+    }
+    
+    return [];
+    
   } catch (error) {
-    console.error('Error fetching web app tasks:', error);
+    console.error(chalk.red('Error fetching web app tasks:'), error.message);
     throw error;
   }
 }
@@ -1366,30 +1550,43 @@ async function createTask(userId) {
   showWelcome();
   
   try {
-    // Get or create personal project
-    const personalProject = await Project.findOne({ userId, isPersonal: true }) || 
-                           await createPersonalProject(userId);
+    console.log(chalk.blue('\nCreate a New Task'));
+    console.log(chalk.gray('──────────────────────────────'));
+    
+    // Get user's personal project (create if doesn't exist)
+    const personalProject = await Project.findOne({ 
+      userId, 
+      isPersonal: true 
+    }) || await createPersonalProject(userId);
     
     if (!personalProject) {
       throw new Error('Could not find or create a personal project');
     }
     
-    console.log(chalk.blue('\nCreate New Task'));
-    console.log(chalk.gray('━'.repeat(40)));
+    // Get user details for default assignee
+    const user = await getUserById(userId);
+    if (!user) {
+      throw new Error('User not found');
+    }
     
-    // Get task details from user
-    const taskDetails = await prompt([
+    // Get current timestamp for task creation
+    const now = new Date();
+    
+    // Prompt for task details
+    const taskData = await prompt([
       {
         type: 'input',
         name: 'title',
         message: 'Task title:',
-        validate: input => input.trim() ? true : 'Title is required'
+        validate: input => input.trim() ? true : 'Title is required',
+        filter: input => input.trim()
       },
       {
         type: 'input',
         name: 'description',
         message: 'Description (optional):',
-        default: ''
+        default: '',
+        filter: input => input.trim()
       },
       {
         type: 'list',
@@ -1398,6 +1595,7 @@ async function createTask(userId) {
         choices: [
           { name: 'To Do', value: 'todo' },
           { name: 'In Progress', value: 'in-progress' },
+          { name: 'In Review', value: 'in-review' },
           { name: 'Completed', value: 'completed' }
         ],
         default: 'todo'
@@ -1407,9 +1605,10 @@ async function createTask(userId) {
         name: 'priority',
         message: 'Priority:',
         choices: [
-          { name: 'High', value: 'high' },
+          { name: 'Low', value: 'low' },
           { name: 'Medium', value: 'medium' },
-          { name: 'Low', value: 'low' }
+          { name: 'High', value: 'high' },
+          { name: 'Urgent', value: 'urgent' }
         ],
         default: 'medium'
       },
@@ -1417,38 +1616,101 @@ async function createTask(userId) {
         type: 'input',
         name: 'dueDate',
         message: 'Due date (YYYY-MM-DD, optional):',
-        default: '',
-        validate: (input) => {
+        validate: input => {
           if (!input) return true;
-          return /^\d{4}-\d{2}-\d{2}$/.test(input) || 'Please use YYYY-MM-DD format';
-        }
+          return /^\d{4}-\d{2}-\d{2}$/.test(input) 
+            ? true 
+            : 'Please enter a valid date in YYYY-MM-DD format';
+        },
+        default: ''
       }
     ]);
     
-    // Create the task
-    const newTask = new Task({
-      title: taskDetails.title.trim(),
-      description: taskDetails.description.trim(),
-      status: taskDetails.status,
-      priority: taskDetails.priority,
-      dueDate: taskDetails.dueDate || undefined,
-      projectId: personalProject._id,
+    // Prepare task data for web app format (exactly like the web version)
+    const taskPayload = {
+      title: taskData.title,
+      description: taskData.description || '',
       userId: userId,
-      createdAt: new Date(),
-      updatedAt: new Date()
-    });
+      columnId: taskData.status, // Map status to columnId
+      status: taskData.status,
+      priority: taskData.priority,
+      order: 0, // Will be updated by the server if needed
+      isBlocked: false,
+      dueDate: taskData.dueDate ? new Date(taskData.dueDate) : null,
+      tags: [],
+      assigneeId: userId,
+      assigneeName: user.displayName || user.email.split('@')[0],
+      createdAt: now,
+      updatedAt: now
+    };
     
-    await newTask.save();
+    // Save to web app's personalTasks collection using the same connection method
+    let savedTask;
+    try {
+      const database = await _getUserDatabaseConnection(userId);
+      if (database) {
+        // Save to personalTasks collection (web app format)
+        const result = await database.collection('personalTasks').insertOne(taskPayload);
+        savedTask = { 
+          id: result.insertedId.toString(),
+          _id: result.insertedId.toString(),
+          ...taskPayload 
+        };
+        console.log(chalk.green('✓ Task saved successfully'));
+      } else {
+        throw new Error('Could not connect to user database');
+      }
+    } catch (webError) {
+      console.warn(chalk.yellow('\nCould not save to web app, falling back to local storage:'));
+      console.warn(chalk.yellow(webError.message));
+      
+      // Fallback to local MongoDB storage
+      const newTask = new Task({
+        ...taskPayload,
+        projectId: personalProject._id
+      });
+      savedTask = await newTask.save();
+      savedTask = {
+        ...savedTask.toObject(),
+        id: savedTask._id.toString(),
+        _id: savedTask._id.toString()
+      };
+    }
     
     console.log(chalk.green('\n✓ Task created successfully!'));
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    console.log(chalk.gray('──────────────────────────────'));
+    console.log(chalk.bold('Title:'), savedTask.title);
+    console.log(chalk.bold('Status:'), formatStatus(savedTask.status));
+    console.log(chalk.bold('Priority:'), formatPriority(savedTask.priority));
     
-    // Show the created task
-    const project = await Project.findById(newTask.projectId);
-    await showTaskDetails(newTask, project, userId);
+    // Ask what to do next
+    const { nextAction } = await prompt([
+      {
+        type: 'list',
+        name: 'nextAction',
+        message: 'What would you like to do next?',
+        choices: [
+          { name: '➕ Create another task', value: 'another' },
+          { name: '📋 View all tasks', value: 'view' },
+          { name: '🏠 Return to dashboard', value: 'dashboard' }
+        ]
+      }
+    ]);
+    
+    switch (nextAction) {
+      case 'another':
+        await createTask(userId);
+        break;
+      case 'view':
+        await showAllTasks(userId);
+        break;
+      default:
+        await showDashboard(userId);
+    }
     
   } catch (error) {
     console.error(chalk.red('\nError creating task:'), error.message);
+    console.log(chalk.yellow('\nReturning to dashboard...'));
     await new Promise(resolve => setTimeout(resolve, 2000));
     await showDashboard(userId);
   }
@@ -1462,13 +1724,47 @@ async function showAllTasks(userId) {
   showWelcome();
   
   try {
-    // Fetch tasks from the web app's personal board
-    const tasks = await fetchWebAppTasks(userId);
+    console.log(chalk.blue('\nLoading your tasks...'));
     
-    if (tasks.length === 0) {
-      console.log(chalk.yellow('\nNo tasks found in your personal board. Create a task to get started!'));
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      return showDashboard(userId);
+    // Get tasks from web app's personal board
+    console.log(chalk.gray('\nFetching tasks from your personal board...'));
+    let tasks = [];
+    
+    try {
+      tasks = await fetchWebAppTasks(userId);
+      console.log(chalk.green(`✓ Found ${tasks.length} tasks`));
+    } catch (error) {
+      console.error(chalk.red('\nError fetching tasks:'), error.message);
+      console.log(chalk.yellow('\nFalling back to local task storage...'));
+      
+      // Fallback to local tasks if web app fetch fails
+      const personalProject = await Project.findOne({ userId, isPersonal: true });
+      if (personalProject) {
+        tasks = await Task.find({ projectId: personalProject._id });
+      }
+    }
+    
+    // If still no tasks, prompt to create one
+    if (!tasks || tasks.length === 0) {
+      console.log(chalk.yellow('\nNo tasks found in your personal board.'));
+      const { action } = await prompt([
+        {
+          type: 'list',
+          name: 'action',
+          message: 'What would you like to do?',
+          choices: [
+            { name: '➕ Create a new task', value: 'create' },
+            { name: '🔙 Go back to dashboard', value: 'back' }
+          ]
+        }
+      ]);
+      
+      if (action === 'create') {
+        await createTask(userId);
+      } else {
+        await showDashboard(userId);
+      }
+      return;
     }
     
     // Group tasks by status
@@ -1968,6 +2264,13 @@ async function init() {
     try {
       const session = await loadSession();
       if (session) {
+        // Ensure the user exists in both Firestore and MongoDB
+        await ensureUserInFirestore({
+          uid: session.uid,
+          email: session.email,
+          displayName: session.displayName
+        });
+        
         console.log(chalk.green(`\nWelcome back, ${session.displayName || session.email}!`));
         await new Promise(resolve => setTimeout(resolve, 1000));
         await showDashboard(session.uid);
@@ -1984,5 +2287,3 @@ async function init() {
     process.exit(1);
   }
 }
-
-init();
