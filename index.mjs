@@ -952,8 +952,8 @@ async function showDashboard(userId) {
       let line = `  • ${item1.label}: ${item1.color.bold(item1.count)}`;
       
       if (item2) {
-        // Add spacing to align the first letter with the 6 in 'Total Tasks: 6'
-        const spacing = item2.label === 'In Progress' ? '     ' : '        ';
+        // Adjusted spacing for 'In Progress' only
+        const spacing = item2.label === 'In Progress' ? '     ' : '    '; // 5 spaces for In Progress, 4 for others
         line += spacing + `• ${item2.label}: ${item2.color ? item2.color.bold(item2.count) : item2.count}`;
       }
       console.log(line);
