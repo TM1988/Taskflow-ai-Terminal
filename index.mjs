@@ -931,7 +931,7 @@ async function showDashboard(userId) {
       };
     }
     
-    console.log(chalk.blue(`\nDashboard - ${user.displayName || user.email.split('@')[0]}`));
+    console.log(chalk.blue(`\n  Dashboard - ${user.displayName || user.email.split('@')[0]}`));
     console.log(chalk.gray('━'.repeat(60)));
     
     // Reorder and display task counts
@@ -962,13 +962,13 @@ async function showDashboard(userId) {
     console.log(chalk.gray('━'.repeat(60)));
     
     const choices = [
-      { name: '📋 View All Tasks', value: 'all-tasks' },
+      { name: '📝 View All Tasks', value: 'all-tasks' },
       { name: '📊 Analytics Dashboard', value: 'analytics' },
       createSeparator(),
       { name: '👤 View Profile', value: 'profile' },
-      { name: '⚙️  Settings', value: 'settings' },
+      { name: '⚙️ Settings', value: 'settings' },
       createSeparator(),
-      { name: '🚪 Logout', value: 'logout' },
+      { name: 'Logout', value: 'logout' },
       { name: 'Exit', value: 'exit' }
     ];
     
