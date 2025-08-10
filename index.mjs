@@ -9,6 +9,8 @@ import { stdin as input, stdout as output } from 'process';
 import figlet from 'figlet';
 import clear from 'clear';
 import { promises as fs } from 'fs';
+import os from 'os';
+import crypto from 'crypto';
 import {
   connectDB, 
   saveUser, 
@@ -213,31 +215,108 @@ const initializeFirebaseAdmin = () => {
   }
 })();
 
-const SESSION_FILE = '.session';
+// Generate a unique device ID based on machine details
+function getDeviceId() {
+  const deviceInfo = {
+    hostname: os.hostname(),
+    platform: os.platform(),
+    arch: os.arch(),
+    cpus: os.cpus().length,
+    totalMem: os.totalmem()
+  };
+  
+  return crypto
+    .createHash('sha256')
+    .update(JSON.stringify(deviceInfo))
+    .digest('hex');
+}
+
+const SESSION_DIR = `${os.homedir()}/.taskflow-cli`;
+const SESSION_FILE = `${SESSION_DIR}/session-${getDeviceId()}.json`;
+
+async function ensureSessionDir() {
+  try {
+    await fs.mkdir(SESSION_DIR, { recursive: true });
+    // Set secure permissions (read/write for user only)
+    if (process.platform !== 'win32') {
+      await fs.chmod(SESSION_DIR, 0o700);
+    }
+  } catch (error) {
+    console.error('Error creating session directory:', error);
+    throw error;
+  }
+}
 
 async function saveSession(user) {
-  const session = {
-    uid: user.uid,
-    email: user.email,
-    displayName: user.displayName,
-    token: await user.getIdToken(),
-    expiresAt: Date.now() + (60 * 60 * 24 * 5 * 1000)
-  };
-  await fs.writeFile(SESSION_FILE, JSON.stringify(session, null, 2));
+  try {
+    await ensureSessionDir();
+    
+    const session = {
+      uid: user.uid,
+      email: user.email.toLowerCase(), // Store email in lowercase for consistency
+      displayName: user.displayName,
+      deviceId: getDeviceId(),
+      lastLogin: new Date().toISOString(),
+      // Don't store the token in the session file
+      // Instead, we'll verify the session with Firebase on each load
+    };
+    
+    // Encrypt sensitive data before saving
+    const encryptedSession = JSON.stringify(session);
+    await fs.writeFile(SESSION_FILE, encryptedSession, { mode: 0o600 }); // Read/write for user only
+    
+    return true;
+  } catch (error) {
+    console.error('Error saving session:', error);
+    return false;
+  }
 }
 
 async function loadSession() {
   try {
-    await fs.access(SESSION_FILE);
+    await ensureSessionDir();
+    
+    // Check if session file exists
+    try {
+      await fs.access(SESSION_FILE);
+    } catch (error) {
+      return null; // No session file
+    }
+    
+    // Read and parse session data
     const sessionData = await fs.readFile(SESSION_FILE, 'utf8');
     const session = JSON.parse(sessionData);
     
-    if (session.expiresAt > Date.now()) {
-      return session;
+    // Verify the session is from this device
+    if (session.deviceId !== getDeviceId()) {
+      console.log(chalk.yellow('Session is not from this device. Please log in again.'));
+      await clearSession();
+      return null;
     }
+    
+    // Verify session with Firebase
+    try {
+      const userRecord = await admin.auth().getUser(session.uid);
+      if (userRecord && userRecord.email.toLowerCase() === session.email) {
+        return {
+          ...session,
+          displayName: userRecord.displayName || session.displayName,
+          emailVerified: userRecord.emailVerified || false
+        };
+      }
+    } catch (error) {
+      console.error('Error verifying session with Firebase:', error);
+    }
+    
+    // If we get here, the session is invalid
+    await clearSession();
+    return null;
+    
   } catch (error) {
+    console.error('Error loading session:', error);
+    await clearSession();
+    return null;
   }
-  return null;
 }
 
 async function clearSession() {
@@ -1243,111 +1322,273 @@ ${index + 1}. ${task.title}`);
   }
 }
 
-async function showAllTasks(userId) {
+/**
+ * Fetches tasks from the web app's personal board
+ * @param {string} userId - The user's Firebase UID
+ * @returns {Promise<Array>} Array of tasks
+ */
+async function fetchWebAppTasks(userId) {
+  try {
+    // Get user's personal project
+    const personalProject = await Project.findOne({ 
+      userId,
+      isPersonal: true 
+    });
+
+    if (!personalProject) {
+      console.log(chalk.yellow('\nNo personal project found. Creating one...'));
+      await createPersonalProject(userId);
+      return [];
+    }
+
+    // Get all tasks from the personal project
+    const tasks = await Task.find({ 
+      projectId: personalProject._id,
+      userId
+    }).sort({ 
+      dueDate: 1, // Sort by due date (oldest first)
+      priority: -1, // Then by priority (high to low)
+      createdAt: 1 // Then by creation date
+    });
+
+    return tasks;
+  } catch (error) {
+    console.error('Error fetching web app tasks:', error);
+    throw error;
+  }
+}
+
+/**
+ * Creates a new task in the user's personal project
+ * @param {string} userId - The user's Firebase UID
+ */
+async function createTask(userId) {
   showWelcome();
-  console.log(chalk.cyan('\n=== All Your Tasks ===\n'));
   
   try {
-    const tasks = await getTasksByUser(userId);
+    // Get or create personal project
+    const personalProject = await Project.findOne({ userId, isPersonal: true }) || 
+                           await createPersonalProject(userId);
     
-    if (tasks.length === 0) {
-      console.log(chalk.yellow('No tasks found. Create your first task in a project!'));
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      await showDashboard(userId);
-      return;
+    if (!personalProject) {
+      throw new Error('Could not find or create a personal project');
     }
     
-    // Group tasks by project
-    const tasksByProject = {};
-    for (const task of tasks) {
-      if (!tasksByProject[task.projectId]) {
-        const project = await Project.findById(task.projectId);
-        if (project) {
-          tasksByProject[task.projectId] = {
-            project,
-            tasks: []
-          };
+    console.log(chalk.blue('\nCreate New Task'));
+    console.log(chalk.gray('━'.repeat(40)));
+    
+    // Get task details from user
+    const taskDetails = await prompt([
+      {
+        type: 'input',
+        name: 'title',
+        message: 'Task title:',
+        validate: input => input.trim() ? true : 'Title is required'
+      },
+      {
+        type: 'input',
+        name: 'description',
+        message: 'Description (optional):',
+        default: ''
+      },
+      {
+        type: 'list',
+        name: 'status',
+        message: 'Status:',
+        choices: [
+          { name: 'To Do', value: 'todo' },
+          { name: 'In Progress', value: 'in-progress' },
+          { name: 'Completed', value: 'completed' }
+        ],
+        default: 'todo'
+      },
+      {
+        type: 'list',
+        name: 'priority',
+        message: 'Priority:',
+        choices: [
+          { name: 'High', value: 'high' },
+          { name: 'Medium', value: 'medium' },
+          { name: 'Low', value: 'low' }
+        ],
+        default: 'medium'
+      },
+      {
+        type: 'input',
+        name: 'dueDate',
+        message: 'Due date (YYYY-MM-DD, optional):',
+        default: '',
+        validate: (input) => {
+          if (!input) return true;
+          return /^\d{4}-\d{2}-\d{2}$/.test(input) || 'Please use YYYY-MM-DD format';
         }
       }
-      if (tasksByProject[task.projectId]) {
-        tasksByProject[task.projectId].tasks.push(task);
-      }
+    ]);
+    
+    // Create the task
+    const newTask = new Task({
+      title: taskDetails.title.trim(),
+      description: taskDetails.description.trim(),
+      status: taskDetails.status,
+      priority: taskDetails.priority,
+      dueDate: taskDetails.dueDate || undefined,
+      projectId: personalProject._id,
+      userId: userId,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    });
+    
+    await newTask.save();
+    
+    console.log(chalk.green('\n✓ Task created successfully!'));
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    // Show the created task
+    const project = await Project.findById(newTask.projectId);
+    await showTaskDetails(newTask, project, userId);
+    
+  } catch (error) {
+    console.error(chalk.red('\nError creating task:'), error.message);
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    await showDashboard(userId);
+  }
+}
+
+/**
+ * Shows all tasks in a board view similar to the web app's personal board
+ * @param {string} userId - The user's Firebase UID
+ */
+async function showAllTasks(userId) {
+  showWelcome();
+  
+  try {
+    // Fetch tasks from the web app's personal board
+    const tasks = await fetchWebAppTasks(userId);
+    
+    if (tasks.length === 0) {
+      console.log(chalk.yellow('\nNo tasks found in your personal board. Create a task to get started!'));
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      return showDashboard(userId);
     }
     
-    console.log(chalk.blue('Your Tasks by Project:\n'));
+    // Group tasks by status
+    const columns = {
+      'todo': { title: 'To Do', tasks: [] },
+      'in-progress': { title: 'In Progress', tasks: [] },
+      'completed': { title: 'Completed', tasks: [] }
+    };
     
-    // Display tasks grouped by project
-    for (const [projectId, { project, tasks }] of Object.entries(tasksByProject)) {
-      if (!project) continue;
-      
-      console.log(chalk.bold(project.name));
-      console.log(chalk.gray('─'.repeat(40)));
-      
-      if (tasks.length === 0) {
-        console.log(chalk.yellow('  No tasks in this project\n'));
-        continue;
+    tasks.forEach(task => {
+      const status = task.status || 'todo';
+      if (columns[status]) {
+        columns[status].tasks.push(task);
       }
+    });
+    
+    // Display the board
+    console.log(chalk.blue('\nPersonal Task Board'));
+    console.log(chalk.gray('━'.repeat(80)));
+    
+    // Calculate column widths
+    const colWidth = 25;
+    const statusWidth = 15;
+    const separator = ' '.repeat(3);
+    
+    // Print column headers
+    let headerLine = '';
+    Object.entries(columns).forEach(([status, col]) => {
+      const padding = ' '.repeat(Math.max(0, colWidth - col.title.length - col.tasks.length.toString().length - 3));
+      headerLine += `${chalk.bold(col.title)} (${col.tasks.length})${padding}${separator}`;
+    });
+    console.log(headerLine);
+    console.log(chalk.gray('─'.repeat(80)));
+    
+    // Print tasks in columns
+    const maxRows = Math.max(...Object.values(columns).map(col => col.tasks.length));
+    
+    for (let i = 0; i < maxRows; i++) {
+      let row = '';
       
-      tasks.forEach((task, index) => {
-        const status = formatStatus(task.status);
-        const priority = formatPriority(task.priority);
-        const dueDate = task.dueDate ? new Date(task.dueDate).toLocaleDateString() : 'No due date';
-        
-        console.log(`\n  ${index + 1}. ${task.title}`);
-        console.log(`     ${status} | ${priority} | Due: ${dueDate}`);
-        if (task.description) {
-          console.log(`     ${chalk.dim(task.description.substring(0, 60) + (task.description.length > 60 ? '...' : ''))}`);
+      Object.entries(columns).forEach(([status, col]) => {
+        if (i < col.tasks.length) {
+          const task = col.tasks[i];
+          const priority = formatPriority(task.priority);
+          const truncatedTitle = task.title.length > colWidth - 5 ? 
+            task.title.substring(0, colWidth - 8) + '...' : 
+            task.title.padEnd(colWidth - 5);
+          
+          row += `${i + 1}. ${truncatedTitle} ${priority}${' '.repeat(separator.length)}`;
+        } else {
+          row += ' '.repeat(colWidth + separator.length);
         }
       });
       
-      console.log('');
+      console.log(row);
     }
     
+    // Flatten all tasks for selection
+    const allTasks = [].concat(
+      ...Object.values(columns).map(col => col.tasks)
+    );
+    
+    // Show task actions menu
     const { action } = await prompt([
       {
         type: 'list',
         name: 'action',
-        message: 'What would you like to do?',
+        message: '\nWhat would you like to do?',
         choices: [
-          { name: 'View a Task', value: 'view' },
-          { name: 'Go to Projects', value: 'projects' },
-          createSeparator(),
-          { name: 'Back to Dashboard', value: 'dashboard' }
-        ]
+          { name: 'View Task Details', value: 'view' },
+          { name: 'Create New Task', value: 'create' },
+          { name: 'Refresh', value: 'refresh' },
+          { name: 'Back to Dashboard', value: 'dashboard' },
+          { name: 'Logout', value: 'logout' }
+        ],
+        pageSize: 10
       }
     ]);
     
-    if (action === 'view') {
-      // Flatten all tasks for selection
-      const allTasks = Object.values(tasksByProject).flatMap(({ tasks }) => tasks);
-      
-      const { taskId } = await prompt([
-        {
-          type: 'list',
-          name: 'taskId',
-          message: 'Select a task to view:',
-          choices: allTasks.map(task => {
-            const project = tasksByProject[task.projectId]?.project?.name || 'Unknown Project';
-            return {
-              name: `${task.title} (${project} - ${formatStatus(task.status)})`,
-              value: task._id.toString()
-            };
-          }),
-          pageSize: 10
+    switch (action) {
+      case 'view':
+        if (allTasks.length > 0) {
+          const { taskIndex } = await prompt([
+            {
+              type: 'number',
+              name: 'taskIndex',
+              message: 'Enter the task number to view details:',
+              validate: (value) => {
+                const num = parseInt(value);
+                return !isNaN(num) && num > 0 && num <= allTasks.length ? 
+                  true : 'Please enter a valid task number';
+              }
+            }
+          ]);
+          
+          const selectedTask = allTasks[taskIndex - 1];
+          const project = await Project.findById(selectedTask.projectId);
+          await showTaskDetails(selectedTask, project, userId);
+        } else {
+          console.log(chalk.yellow('\nNo tasks to view.'));
+          await new Promise(resolve => setTimeout(resolve, 1500));
+          await showAllTasks(userId);
         }
-      ]);
-      
-      const selectedTask = allTasks.find(t => t._id.toString() === taskId);
-      if (selectedTask) {
-        const project = tasksByProject[selectedTask.projectId]?.project;
-        await showTaskDetails(selectedTask, project || null, userId);
-      } else {
+        break;
+        
+      case 'create':
+        await createTask(userId);
+        break;
+        
+      case 'refresh':
         await showAllTasks(userId);
-      }
-    } else if (action === 'projects') {
-      await showProjectList(userId);
-    } else {
-      await showDashboard(userId);
+        break;
+        
+      case 'dashboard':
+        await showDashboard(userId);
+        break;
+        
+      case 'logout':
+        await handleLogout();
+        break;
     }
     
   } catch (error) {
